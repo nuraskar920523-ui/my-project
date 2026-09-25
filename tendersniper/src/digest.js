@@ -3,14 +3,34 @@
 // Критерии: Маржа >= 15%, Статус 🟢 ТОЧНОЕ СОВПАДЕНИЕ, Все методы (ЗЦП, ОИ, ОК)
 // Без ограничения Топ-5: выдает всю выборку лотов для выполнения плана!
 // ====================================================================
+const fs = require('fs');
+//@@include:config
+//@@include:lock
+//@@include:registry
+//@@include:regex_util
+//@@include:finance
+
 const items = $input.all();
 
-let chatId = 681740470;
+let chatId = TS_CONFIG.ADMIN_CHAT_ID;
+let lockOwner = null;
 try {
-  chatId = $('Auth & Command Router').first()?.json?.chatId || items[0]?.json?.chatId || 681740470;
+  const auth = $('Auth & Command Router').first()?.json || {};
+  chatId = auth.chatId || items[0]?.json?.chatId || TS_CONFIG.ADMIN_CHAT_ID;
+  lockOwner = auth.lockOwner || null;
 } catch (e) {
-  chatId = items[0]?.json?.chatId || 681740470;
+  chatId = items[0]?.json?.chatId || TS_CONFIG.ADMIN_CHAT_ID;
 }
+
+function formatDeadline(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+  const hoursLeft = Math.round((d.getTime() - Date.now()) / 3600000);
+  return d.toLocaleString('ru-RU', { timeZone: 'Asia/Almaty', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) +
+    ' (' + (hoursLeft >= 48 ? Math.round(hoursLeft / 24) + ' дн.' : hoursLeft + ' ч') + ')';
+}
+const truncate = (t, n) => { const s = String(t || ''); return s.length > n ? s.substring(0, n - 1) + '…' : s; };
 
 function formatKZT(n) { 
   return Math.round(n || 0).toLocaleString('ru-RU') + ' ₸'; 
@@ -47,23 +67,28 @@ function getMethodName(id) {
 
 const now = new Date().toLocaleString('ru-RU', { timeZone: 'Asia/Almaty' });
 
-// 1. Отбор ВСЕХ лотов под критерии Соло-режима (Маржа >= 15% И точное совпадение)
+const CRITERIA_TEXT = 'Маржа ≥ ' + TS_CONFIG.DIGEST_MIN_MARGIN + '% или прибыль ≥ ' +
+  TS_CONFIG.DIGEST_ALT_MIN_PROFIT.toLocaleString('ru-RU') + ' ₸ при марже ≥ ' + TS_CONFIG.DIGEST_ALT_MIN_MARGIN + '%';
+
+// 1. Отбор лотов под критерии Соло-режима + сбор статистики пропущенного
 const eligibleLots = [];
+const manualLots = [];
+let lockedCount = 0, aiFailCount = 0, rejectedCount = 0, belowCount = 0;
 for (const item of items) {
   const d = item.json || {};
-  if (!d.isCompatible || !d.productCode) continue;
-
-  const margin = Number(d.marginPercent || 0);
+  if (d.empty) continue;
+  if (d.isVendorLocked) { lockedCount++; continue; }
+  if (d.apiError) { aiFailCount++; continue; }
+  if (d.needsManualReview) { manualLots.push(d); continue; }
+  if (!d.isCompatible || !d.productCode) { rejectedCount++; continue; }
   const isExactMatch = d.matchBadge === '🟢 ТОЧНОЕ СОВПАДЕНИЕ';
-
-  const profit = Number(d.profit || 0);
-  const isHighMargin = margin >= 15;
-  const isHighProfit = profit >= 30000 && margin >= 5;
-
-  if ((isHighMargin || isHighProfit) && isExactMatch) {
-    eligibleLots.push(d);
-  }
+  if (isExactMatch && isDigestEligible(d.marginPercent, d.profit)) eligibleLots.push(d);
+  else belowCount++;
 }
+
+let preMeta = {}, mergeMeta = {};
+try { preMeta = $('Pre-Filter & Candidate Builder').first()?.json || {}; } catch (e) {}
+try { mergeMeta = $('Merge & Deduplicate Lots').first()?.json || {}; } catch (e) {}
 
 // 2. Сортировка по убыванию маржинальности (самые прибыльные первыми)
 eligibleLots.sort((a, b) => (Number(b.marginPercent) || 0) - (Number(a.marginPercent) || 0));
@@ -75,7 +100,8 @@ let totalProfit = 0;
 for (let i = 0; i < eligibleLots.length; i++) {
   const d = eligibleLots[i];
   totalProfit += (d.profit || 0);
-  const truncatedName = (d.productName || '').length > 45 ? d.productName.substring(0, 45) + '...' : (d.productName || '');
+  const truncatedName = truncate(d.productName, 60);
+  const deadlineText = formatDeadline(d.endDate);
   const safeName = escapeHtml(truncatedName);
   const safeLotNum = escapeHtml(d.lotId);
   const tag = d.isBundle ? '📦 <b>[КОМПЛЕКТ]</b> ' : '🔹 ';
@@ -85,14 +111,15 @@ for (let i = 0; i < eligibleLots.length; i++) {
   verifiedBullets.push(
     tag + '<b>#' + (i + 1) + ' | Лот № ' + safeLotNum + '</b>: <i>' + safeName + '</i> (' + d.lotQty + ' шт)\n' +
     '   • Поставщик: <b>' + distName + '</b> | Товар: <code>' + escapeHtml(d.productCode || '—') + '</code>\n' +
-    '   • Способ: <b>' + escapeHtml(methodName) + '</b>\n' +
-    '   • Бюджет: <b>' + formatKZT(d.lotBudget) + '</b> | Подача: <b>' + formatKZT(d.targetBid) + '</b> (-10%)\n' +
+    '   • Способ: <b>' + escapeHtml(methodName) + '</b>' + (deadlineText ? ' | ⏳ До: <b>' + escapeHtml(deadlineText) + '</b>' : '') + '\n' +
+    '   • Бюджет: <b>' + formatKZT(d.lotBudget) + '</b> | Подача: <b>' + formatKZT(d.targetBid) + '</b> (-' + Math.round(TS_CONFIG.BID_DISCOUNT * 100) + '%)\n' +
     '   • Закупка: <code>' + formatKZT(d.totalCost) + '</code> | Доставка: <code>' + formatKZT(d.logisticsCost) + '</code>\n' +
     '   • Налог СНР 3%: <code>' + formatKZT(d.totalTax) + '</code> <i>(ФНО 910.00, без НДС и КПН)</i>\n' +
     '   • <b>Чистая прибыль:</b> <code>+' + formatKZT(d.profit) + '</code> (<b>+' + (d.marginPercent || 0).toFixed(1) + '%</b>)\n' +
     '   • Статус: ' + d.matchBadge + ' | ' + (d.rnuRisk || 'НЕТ РИСКА') + '\n' +
-    '   • <i>' + escapeHtml(d.aiVerdict) + '</i>\n' +
-    '   🔗 <a href="' + d.directUrl + '">Открыть лот на Госзакуп</a>'
+    (d.isManualReviewRequired ? '   • ⚠️ <i>Скан ТЗ слишком большой — сверьте ТЗ вручную</i>\n' : '') +
+    '   • <i>' + escapeHtml(truncate(d.aiVerdict, 350)) + '</i>\n' +
+    '   🔗 <a href="' + escapeHtml(d.directUrl) + '">Открыть лот на Госзакуп</a>'
   );
 
   rowsToExport.push({
@@ -100,8 +127,8 @@ for (let i = 0; i < eligibleLots.length; i++) {
     'Менеджер': 'TenderSniper Almaty Solo',
     'Поставщик': d.distributor || 'Al-Style',
     'Номер_Лота': d.lotId,
-    'rawLotId': d.rawLotId,
-    'annoNum': d.annoNum,
+    'rawLotId': d.trdBuyId || '',
+    'annoNum': '',
     'Способ_Закупки': methodName,
     'Ссылка_Госзакуп': d.directUrl,
     'Код': d.productCode,
@@ -119,15 +146,31 @@ for (let i = 0; i < eligibleLots.length; i++) {
     'Запас_Маржи_%': (d.marginPercent || 0).toFixed(1) + '%',
     'ИИ_Вердикт': d.aiVerdict,
     'ИИ_Риск_РНУ': d.rnuRisk,
-    'Статус': 'Алматы Соло (Маржа ≥15%)'
+    'Статус': 'Алматы Соло (' + CRITERIA_TEXT + ')' + (d.endDate ? ' | дедлайн ' + formatDeadline(d.endDate) : '')
   });
 }
 
-// 3. Формирование сообщений для Telegram с защитой от лимита 4096 символов
+// 3. Сводка по лотам, которые не попали в выборку (раньше терялись молча)
+const statLines = [];
+if (manualLots.length) {
+  statLines.push('🟡 <b>Требуют ручной проверки: ' + manualLots.length + '</b>');
+  for (const m of manualLots.slice(0, 8)) {
+    statLines.push('   • <a href="' + escapeHtml(m.directUrl) + '">Лот № ' + escapeHtml(m.lotId) + '</a> — ' + escapeHtml(truncate(m.lotName, 50)));
+  }
+}
+if (aiFailCount) statLines.push('⚠️ Не проверено из-за сбоя Gemini: <b>' + aiFailCount + '</b> (повтор в следующем цикле)');
+if (lockedCount) statLines.push('⛔ Отсеяно по вендор-локам/заточке: ' + lockedCount);
+if (rejectedCount || belowCount) statLines.push('🔍 Отклонено ИИ: ' + rejectedCount + ' | Ниже порога маржи: ' + belowCount);
+if (preMeta.deferredLots) statLines.push('⏭ Отложено до следующего цикла (лимит 30 лотов): ' + preMeta.deferredLots);
+if (preMeta.skippedDocPending) statLines.push('📄 Ждут чтения ТЗ: ' + preMeta.skippedDocPending);
+if (mergeMeta.errorCount && !mergeMeta.apiFailure) statLines.push('⚠️ Ошибки ЦЭФ API: ' + mergeMeta.errorCount + ' из ' + (mergeMeta.keywordCount || '?') + ' запросов');
+const statsBlock = statLines.length ? '\n\n' + statLines.join('\n') : '';
+
+// 4. Формирование сообщений для Telegram с защитой от лимита 4096 символов
 const outputMessages = [];
 
 if (verifiedBullets.length > 0) {
-  const MAX_BODY_LEN = 3000;
+  const MAX_BODY_LEN = 2600; // + заголовок и сводка — укладываемся в лимит Telegram 4096
   const chunkList = [];
   let curChunk = [];
   let curLen = 0;
@@ -156,11 +199,11 @@ if (verifiedBullets.length > 0) {
     const hasStaleCatalog = eligibleLots.some(l => l.staleCatalog);
     if (c === 0) {
       if (hasStaleCatalog) {
-        chunkBody += '⚠️ <i>Внимание: Кэш каталога Al-Style старше 36 часов.</i>\n\n';
+        chunkBody += '⚠️ <i>Внимание: кэш каталога старше 48 часов — цены могли измениться.</i>\n\n';
       }
       chunkBody += 
         '📍 <b>Регион:</b> г. Алматы (КАТО 75*) | Способы: ЗЦП, ОИ, ОК\n' +
-        '🎯 <b>Отобрано лотов к подаче:</b> <b>' + eligibleLots.length + ' шт.</b> (Маржа ≥ 15%)\n' +
+        '🎯 <b>Отобрано лотов к подаче:</b> <b>' + eligibleLots.length + ' шт.</b> (' + CRITERIA_TEXT + ')\n' +
         '💰 <b>Общая прибыль по выборке:</b> <b>+' + formatKZT(totalProfit) + '</b>\n\n' +
         '📦 <b>ОТОБРАННЫЕ ЛОТЫ:</b>\n\n';
     }
@@ -168,7 +211,7 @@ if (verifiedBullets.length > 0) {
     chunkBody += chunkBullets.join('\n\n');
 
     if (c === totalChunks - 1) {
-      chunkBody += '\n\n━━━━━━━━━━━━━━━━━━━━\n📁 <i>Все ' + eligibleLots.length + ' лотов зафиксированы в Google Таблицу.</i>';
+      chunkBody += statsBlock + '\n\n━━━━━━━━━━━━━━━━━━━━\n📁 <i>Все ' + eligibleLots.length + ' лотов записываются в Google Таблицу.</i>';
     }
 
     outputMessages.push({
@@ -193,7 +236,7 @@ if (verifiedBullets.length > 0) {
         '❌ <b>TENDERSNIPER LITE — ОШИБКА КАТАЛОГА</b>\n━━━━━━━━━━━━━━━━━━━━\n' +
         '📍 <b>Регион:</b> г. Алматы (КАТО 75*)\n\n' +
         'Не удалось загрузить номенклатуру каталога Al-Style (файл кэша отсутствует или повреждён).\n' +
-        'Проверьте наличие файла кэша <code>alstyle_catalog_cache.json</code> на сервере n8n.',
+        'Проверьте наличие файлов <code>multi_catalog_cache.json</code> / <code>alstyle_catalog_cache.json</code> в <code>/home/node/.n8n/</code>.',
       chunkIndex: 0,
       isFirstChunk: true
     });
@@ -213,7 +256,7 @@ if (verifiedBullets.length > 0) {
       text:
         '🍎 <b>TENDERSNIPER LITE — АЛМАТЫ СОЛО</b>\n━━━━━━━━━━━━━━━━━━━━\n' +
         '📍 <b>Регион:</b> г. Алматы (КАТО 75*) | Способы: ЗЦП, ОИ, ОК\n\n' +
-        'За текущий цикл подходящих лотов по Алматы с маржой <b>≥ 15%</b> и <b>100% точным совпадением</b> не найдено.\n' +
+        'За текущий цикл подходящих лотов по Алматы (' + CRITERIA_TEXT + ', 🟢 точное совпадение) не найдено.' + statsBlock + '\n\n' +
         '<i>Следующая проверка: 09:30 или 13:00 (Asia/Almaty).</i>',
       chunkIndex: 0,
       isFirstChunk: true
@@ -223,7 +266,19 @@ if (verifiedBullets.length > 0) {
 
 console.log('[ALMATY EXPANDED DIGEST] Отобрано лотов: ' + eligibleLots.length + ', прибыль: ' + totalProfit + ' KZT, сообщений: ' + outputMessages.length);
 
-// Блокировка сканирования staticData.lastScanTime = 0 снимается исключительно в терминальном узле сохранения истории либо по истечении таймаута LOCK_TIMEOUT_MS
+// 5. Отправленные лоты — в локальный реестр ДО отправки (дедуп не зависит от записи в Google Sheets)
+if (eligibleLots.length) {
+  const reg = tsLoadRegistry(fs);
+  const ts = Date.now();
+  for (const d of eligibleLots) reg.sent[String(d.lotId)] = { ts };
+  tsSaveRegistry(fs, reg);
+}
+
+// 6. Снятие блокировки сканирования (только своей — по lockOwner из Auth)
+if (lockOwner) {
+  const released = tsReleaseLock(fs, lockOwner);
+  console.log('[AUTH LOCK] ' + (released ? 'Блокировка снята.' : 'Блокировка уже снята или принадлежит другому запуску.'));
+}
 
 // Возвращаем сообщения для отправки в Telegram
 return outputMessages.map(m => ({

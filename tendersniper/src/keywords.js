@@ -1,7 +1,6 @@
 // ====================================================================
 // ГЕНЕРАЦИЯ ЦЕЛЕВЫХ ЗАПРОСОВ ПО ИТ-КАТЕГОРИЯМ КАТАЛОГА AL-STYLE
-// Вместо слепого limit:200 — целевой поиск по ключевым словам
-// Покрывает 95%+ товарных категорий Al-Style
+// Токен ЦЭФ здесь больше НЕ передаётся в items (иначе он сохраняется в истории executions).
 // ====================================================================
 const IT_KEYWORDS = [
   'принтер', 'мфу', 'ноутбук', 'компьютер', 'монитор',
@@ -14,6 +13,6 @@ const IT_KEYWORDS = [
   'чернила', 'фотобарабан', 'poe', 'ssd', 'инвертор'
 ];
 
+const lockOwner = $input.first()?.json?.lockOwner || null;
 console.log('[KEYWORDS] Генерация ' + IT_KEYWORDS.length + ' целевых запросов по ИТ-категориям');
-const gzToken = (typeof process !== 'undefined' && process.env?.GOSZAKUP_TOKEN) || (typeof $env !== 'undefined' && $env.GOSZAKUP_TOKEN) || '';
-return IT_KEYWORDS.map(keyword => ({ json: { keyword, gzToken } }));
+return IT_KEYWORDS.map(keyword => ({ json: { keyword, lockOwner } }));

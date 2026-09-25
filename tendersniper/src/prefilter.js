@@ -1,17 +1,23 @@
-const geminiKey = (typeof $env !== 'undefined' && $env.GEMINI_API_KEY) || (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) || '';
 // ====================================================================
 // УЗЕЛ: 4-УРОВНЕВЫЙ ИНТЕЛЛЕКТУАЛЬНЫЙ КОНВЕЙЕР (V5.3.0 ANTI-STARVATION & HARD-LOCKS)
 // Реализация архитектурного плана:
 // 1. Структурный Hard-Lock: исключение isAcc/фурнитуры для первичных устройств (isPrimaryLot)
-// 2. Слияние с retrieval: lotTokens строятся из полного обогащенного текста (rawTitle)
+// 2. Слияние с retrieval: lotTokens строятся из названия + описания + ТТХ файла (rawTitle);
+//    категория лота — только из названия и описания портала (classText)
 // 3. IDF/Relevance скоринг кандидатов
 // 4. Взаимное исключение категорий (RE_MONITOR vs RE_AIO vs RE_LAPTOP vs RE_DESKTOP)
 // 5. Позитивная контекстная проверка для «гарнитур» + стоп-слова не-ИТ
-// 6. Квотирование на уровне ЛОТОВ (Anti-Starvation: max 3 лота на категорию)
+// 6. Квотирование на уровне ЛОТОВ (Anti-Starvation: max 5 лотов на категорию)
 // ====================================================================
 
 // Загрузка мультикаталога напрямую с диска (защита от разрастания SQLite n8n)
 const fs = require('fs');
+//@@include:config
+//@@include:env
+//@@include:registry
+//@@include:regex_util
+//@@include:finance
+//@@include:lotfilters
 const catalogStatus = $input.first()?.json || {};
 
 let catalogRows = [];
@@ -34,7 +40,7 @@ if (!Array.isArray(catalogRows) || catalogRows.length === 0) {
     json: {
       empty: true,
       catalogLoadError: true,
-      chatId: 681740470
+      chatId: TS_CONFIG.ADMIN_CHAT_ID
     }
   }];
 }
@@ -58,25 +64,17 @@ try {
   historyRows = $('Fetch Lot History').all().map(i => i.json).filter(Boolean);
 } catch (e) {}
 
-let chatId = 681740470;
+let chatId = TS_CONFIG.ADMIN_CHAT_ID;
 try {
-  chatId = $('Auth & Command Router').first()?.json?.chatId || 681740470;
+  chatId = $('Auth & Command Router').first()?.json?.chatId || TS_CONFIG.ADMIN_CHAT_ID;
 } catch (e) {}
 
-// --- ДЕДУПЛИКАЦИЯ ПО ИСТОРИИ ---
-const sentLotIds = new Set();
-for (const r of historyRows) {
-  for (const [k, v] of Object.entries(r)) {
-    const lk = k.toLowerCase();
-    if (lk.includes('номер') || lk.includes('лот') || lk.includes('id')) {
-      if (v) sentLotIds.add(String(v).trim());
-    }
-  }
-}
-
-function makeWordRegex(pattern) {
-  return new RegExp('(?<![a-zа-яё0-9])(' + pattern + ')(?![a-zа-яё0-9])', 'i');
-}
+// --- ДЕДУПЛИКАЦИЯ ПО ИСТОРИИ (Google Sheets) И ЛОКАЛЬНОМУ РЕЕСТРУ ---
+const sentLotIds = tsHistoryIds(historyRows);
+const registry = tsLoadRegistry(fs);
+const USD_KZT_RATE = parseFloat(tsGetEnv('USD_KZT_RATE', '0')) || 0;
+let skippedUsdRows = 0;
+let skippedDocPending = 0;
 
 const VENDOR_LOCK_PATTERNS = [
   { regex: makeWordRegex('fortilink'), name: 'Fortinet FortiLink (Проектный VAD вендор)' },
@@ -95,8 +93,7 @@ const VENDOR_LOCK_PATTERNS = [
   { regex: makeWordRegex('фото[ \t/]*видео[ \t]*образц[а-я]*'), name: 'Заточка (фото/видео образца)' }
 ];
 
-const RE_NON_IT_LOT = /(?:мебель[а-я]*|спальн[а-я]*|кухонн[а-я]*|кроват[а-я]*|шкаф[а-я]*|диван[а-я]*|матрас[а-я]*|одежд[а-я]*|посуд[а-я]*|клеточн[а-я]*\s*культур|зажим[а-я]*\s*для\s*бумаг|папка-планшет|планшет\s*канцелярск|дезинфекционн[а-я]*|морозильн[а-я]*|холодильн[а-я]*|автомобильн[а-я]*|велосипедн[а-я]*|камера[ \t]+хранения)/i;
-const RE_FURNITURE = /(?:мебель[а-я]*|спальн[а-я]*|кухонн[а-я]*|кроват[а-я]*|шкаф[а-я]*|диван[а-я]*|матрас[а-я]*|комод[а-я]*|стол[а-я]*|тумбочк[а-я]*)/i;
+const RE_FURNITURE = makeWordRegex('мебель[а-я]*|спальн[а-я]*|кухонн[а-я]*|кроват[а-я]*|шкаф[а-я]*|диван[а-я]*|матрас[а-я]*|комод[а-я]*|стол|стола|столы|столов|тумбочк[а-я]*');
 const RE_HEADSET_POSITIVE = /(?:наушник|микрофон|аудио|bluetooth|блютуз|проводн|беспроводн|usb|jack|разъем|type-c|связи|гарнитур[а-я]*[ \t]+для[ \t]+(?:пк|компьютер|телефон|раци|call|колл|диспетчер))/i;
 
 const RE_A3 = makeWordRegex('а3|a3');
@@ -118,7 +115,21 @@ const RE_MFP = makeWordRegex('мфу|3-в-1|3[ \t]*в[ \t]*1|all-in-one|мног
 const RE_PRINTER = makeWordRegex('принтер[а-я]*');
 const RE_3D_OR_POS = makeWordRegex('3d|3д|чеков|этикеток|филаментн[а-я]*|фотополимерн[а-я]*|термопринтер');
 const RE_PARTS_PREFIX = /^(?:рюкзак|сумк|чехол|папк|портфель|подставк|картридж|тонер|драм|чернила|барабан|фотобарабан|термопл|вал|бушинг|шлейф|шарнир|ролик|сепаратор|накладк|девелопер|фьюзер|лоток|тумб|пьедестал|чип|ракел|лезви|термоблок|шестерн|ремкомплект|ремонтный[ \t]*комплект|комплект[ \t]*инициализации|кабел|патч-корд|фильтр|удлинитель|переходник|адаптер|гарнитур|наушник|бумаг|скрепк)[а-я]*/i;
-const RE_COLOR = makeWordRegex('цветн[а-я]*|color|cmyk|полноцветн[а-я]*|түрлі[ \t]*түсті');
+// «Цветной сенсорный дисплей/экран» у монохромного МФУ — не требование цветной печати
+const RE_COLOR_DISPLAY = /(?:цветн[а-я]*|color)[ \t]+(?:сенсорн[а-я]*[ \t]+)?(?:жк[- \t]*|lcd[ \t]*|tft[ \t]*)?(?:дисплей|экран|панел|touch|display|screen)[а-я]*|(?:дисплей|экран|панель|display|screen)[а-я]*[ \t:–-]+(?:сенсорн[а-я]*[ \t,]+)?(?:цветн[а-я]*|color)/gi;
+const stripColorDisplay = (t) => String(t || '').replace(RE_COLOR_DISPLAY, ' ');
+// Цветность ПЕЧАТИ: 'color' | 'mono' | null (если есть оба признака — решает ИИ, фильтр не применяется).
+// «цветность» (существительное) и цветное сканирование/копирование не считаются требованием цветной печати.
+const RE_COLOR_PRINT = makeWordRegex('цветн(?:ой|ая|ое|ые|ого|ых|ую|ым|ыми)|color|cmyk|полноцветн[а-я]*|түрлі[ \t]*түсті');
+const RE_COLOR_NON_PRINT = /цветн[а-я]*[ \t]+(?:сканирован|копирован|скан|копи)[а-я]*|(?:сканирован|копирован)[а-я]*[ \t:–-]+цветн[а-я]*/gi;
+function detectColorMode(text) {
+  const t = stripColorDisplay(text).replace(RE_COLOR_NON_PRINT, ' ');
+  const c = RE_COLOR_PRINT.test(t);
+  const m = RE_MONO.test(t);
+  if (c && !m) return 'color';
+  if (m && !c) return 'mono';
+  return null;
+}
 const RE_MONO = makeWordRegex('монохромн[а-я]*|черно-бел[а-я]*|ч/б|ч-б|mono|ак-кара');
 const RE_LAPTOP = makeWordRegex('ноутбук[а-я]*|лэптоп[а-я]*|laptop');
 const RE_AIO = makeWordRegex('моноблок[а-я]*|all-in-one|aio');
@@ -133,7 +144,8 @@ const RE_MONITOR = makeWordRegex('монитор[а-я]*');
 const RE_PHONE = makeWordRegex('телефон[а-я]*|смартфон[а-я]*');
 const RE_FLASH = makeWordRegex('флеш[а-я]*|flash|usb-флеш[а-я]*');
 
-const RE_TABLET_PC = makeWordRegex('ipados|ipad|айпад|ios|android|андроид|windows[ 	]*1[01]|планшетный[ 	]*пк|планшетный[ 	]*компьютер|сенсорный[ 	]*экран|сенсорный[ 	]*дисплей|multi-touch|мультитач|a16|bionic|apple|snapdragon|dimensity|qualcomm|m1|m2|m3|m4|touch[ 	]*id|face[ 	]*id|фронтальн[а-я]*[ 	]*камер[а-я]*|основн[а-я]*[ 	]*камер[а-я]*|динамик[а-я]*|аккумулятор|li-pol|wi-fi[ 	]*6|дисплей[ 	]*не[ 	]*менее|встроенн[а-я]*[ 	]*памят[а-я]*');
+// Только сильные маркеры планшетного ПК (Windows/аккумулятор/динамик/память встречаются у ПК и ноутбуков)
+const RE_TABLET_PC = makeWordRegex('ipados|ipad|айпад|android|андроид|планшетный[ \t]*пк|планшетный[ \t]*компьютер|galaxy[ \t]*tab|lenovo[ \t]*tab|mediapad|matepad|redmi[ \t]*pad|xiaomi[ \t]*pad');
 const RE_DIGITIZER = makeWordRegex('дигитайзер|digitizer|перо[ 	]+без[ 	]+батареи|пассивн[а-я]*[ 	]+перо|стилус[ 	]+без[ 	]+батареи|уровн[а-я]*[ 	]+давления|lpi|8192|4096|huion|xp-pen|wacom|графическ[а-я]*[ 	]+планшет|планшет[ 	]+для[ 	]+рисован[а-я]*|интерактивн[а-я]*[ 	]+дисплей[ 	]+huion');
 
 // ХАРД-ЛОКИ НОВЫХ IT-КАТЕГОРИЙ (Task 7): ИБП, Проекторы, Видеонаблюдение/Камеры, Точки доступа
@@ -153,9 +165,6 @@ const RE_ACCESSORY = makeWordRegex(
 );
 const RE_PRIMARY = makeWordRegex('ноутбук[а-я]*|принтер[а-я]*|мфу|компьютер[а-я]*|моноблок[а-я]*|сервер[а-я]*|коммутатор[а-я]*|маршрутизатор[а-я]*|роутер[а-я]*|монитор[а-я]*|смартфон[а-я]*|телефон[а-я]*');
 
-const RE_LOG_SMALL = makeWordRegex('флеш[а-я]*|flash|usb|кабель[а-я]*|патч-корд[а-я]*|мышь|mouse|коврик[а-я]*|наушник[а-я]*|гарнитур[а-я]*|headset|адаптер[а-я]*|переходник[а-я]*|картридж[а-я]*|тонер[а-я]*|cartridge|toner');
-const RE_LOG_HEAVY = makeWordRegex('сервер[а-я]*|стойк[а-я]*');
-const RE_LOG_OFFICE = makeWordRegex('принтер[а-я]*|мфу|компьютер[а-я]*|системный[ \t]*блок|моноблок[а-я]*|монитор[а-я]*|ибп');
 
 const STOP_WORDS = new Set([
   'штук', 'штука', 'штуки', 'шт', 'поставка', 'для', 'комплект', 'товар', 'товара', 'товаров',
@@ -192,64 +201,6 @@ function tokenize(text) {
   return Array.from(tokens);
 }
 
-function calculateLogistics(productName, lotQty) {
-  const isSmall = RE_LOG_SMALL.test(productName);
-  let unitFee = 3000;
-  if (RE_LOG_HEAVY.test(productName)) {
-    unitFee = 15000;
-  } else if (RE_LOG_OFFICE.test(productName)) {
-    unitFee = 4500;
-  } else if (isSmall) {
-    unitFee = 500;
-  }
-  let baseCost = unitFee * lotQty;
-  if (isSmall) {
-    baseCost = Math.min(baseCost, 6000);
-  }
-  return Math.min(Math.max(baseCost, 3000), 150000);
-}
-
-function evaluateFinancials(lotBudget, purchaseCost, lotQty, productName) {
-  // Налоговый режим: СНР на основе упрощенной декларации (3% от общего оборота, ФНО 910.00)
-  // ТОО «Os.Corp Energy» не является плательщиком НДС (НДС = 0, КПН = 0)
-  const SNR_TAX_RATE = 0.03;
-
-  const targetBid = Math.round(lotBudget * 0.90);
-  const totalPurchase = Math.round(purchaseCost * lotQty);
-  const logisticsCost = calculateLogistics(productName, lotQty);
-
-  const snrTax = Math.round(targetBid * SNR_TAX_RATE);
-  const vatPayable = 0; // Без НДС
-  const citPayable = 0; // Без КПН 20%
-  const totalTax = snrTax; // Ровно 3% от суммы контракта
-
-  const totalExpenses = totalPurchase + logisticsCost + totalTax;
-  const netProfit = targetBid - totalExpenses;
-  const marginPercent = targetBid > 0 ? +((netProfit / targetBid) * 100).toFixed(1) : 0;
-
-  let isViable = false;
-  if (targetBid <= 100000) {
-    isViable = (netProfit >= 7000 && marginPercent >= 10);
-  } else if (targetBid <= 1000000) {
-    isViable = (netProfit >= 15000 && marginPercent >= 8);
-  } else {
-    isViable = (netProfit >= 40000 && marginPercent >= 6);
-  }
-
-  return {
-    targetBid,
-    totalPurchase,
-    logisticsCost,
-    vatPayable,
-    citPayable,
-    totalTax,
-    totalExpenses,
-    netProfit,
-    marginPercent,
-    isViable
-  };
-}
-
 // ====================================================================
 // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ СЖАТИЯ ТЗ И ИЗВЛЕЧЕНИЯ ТТХ
 // ====================================================================
@@ -281,9 +232,9 @@ function compressLotText(text) {
   }
   const compressed = techLines.join('\n');
   if (compressed.length >= 50) {
-    return compressed.length > 750 ? compressed.substring(0, 747) + '...' : compressed;
+    return compressed.length > 2500 ? compressed.substring(0, 2497) + '...' : compressed;
   }
-  return text.substring(0, 450) + (text.length > 450 ? '...[сжато]' : '');
+  return text.substring(0, 1500) + (text.length > 1500 ? '...[сжато]' : '');
 }
 
 
@@ -296,18 +247,23 @@ const accessoryIndices = [];
 for (let idx = 0; idx < catalogRows.length; idx++) {
   const row = catalogRows[idx];
   let purchasePrice = 0, code = '', sku = '', name = '', fullName = '', stock = 0, distributor = row.distributor || 'Al-Style';
+  let dealerPrice = 0, genericPrice = 0, currency = '';
 
   for (const [key, rawVal] of Object.entries(row)) {
     const cleanKey = key.toLowerCase().trim();
     const val = String(rawVal || '').trim();
-    if (!purchasePrice && (cleanKey.includes('дил') || cleanKey.includes('закуп') || cleanKey.includes('цена') || cleanKey.includes('cost'))) {
-      if (!cleanKey.includes('уцен')) {
-        const num = parseFloat(val.replace(/\s+/g, '').replace(/,/g, '.').replace(/[^0-9.]/g, ''));
-        if (!isNaN(num) && num > 100) purchasePrice = num;
+    // Цена: приоритет дилерской/закупочной; розничная/РРЦ/уценка не используются
+    const isPriceKey = /дил|закуп|cost|опт|dealer|цена|price/.test(cleanKey);
+    if (isPriceKey && !/уцен|розн|rrp|retail|рекоменд|старая|old/.test(cleanKey)) {
+      const num = parseFloat(val.replace(/\s+/g, '').replace(/,/g, '.').replace(/[^0-9.]/g, ''));
+      if (!isNaN(num) && num > 0) {
+        if (/дил|закуп|cost|опт|dealer/.test(cleanKey)) { if (!dealerPrice) dealerPrice = num; }
+        else if (!genericPrice) genericPrice = num;
       }
     }
-    if (cleanKey.includes('код') || cleanKey === 'code') code = val;
-    if (cleanKey.includes('арт') || cleanKey === 'sku') sku = val;
+    if (/валют|currency/.test(cleanKey)) currency = val.toUpperCase();
+    if ((cleanKey.includes('код') && !/штрих|barcode|ean/.test(cleanKey)) || cleanKey === 'code') code = val;
+    if (cleanKey.startsWith('арт') || cleanKey === 'sku' || cleanKey === 'article') sku = val;
     if (cleanKey.includes('полное') || cleanKey.includes('full') || cleanKey.includes('описан')) fullName = val;
     else if (cleanKey.includes('наимен') || cleanKey.includes('name')) name = val;
     if (cleanKey.includes('остат') || cleanKey.includes('склад') || cleanKey.includes('stock')) {
@@ -316,8 +272,16 @@ for (let idx = 0; idx < catalogRows.length; idx++) {
     }
   }
 
+  purchasePrice = dealerPrice || genericPrice;
+  // Валюта: цены в USD пересчитываются по USD_KZT_RATE; без курса такие строки пропускаются
+  if (purchasePrice && /USD|\$|ДОЛЛ/.test(currency)) {
+    if (USD_KZT_RATE > 0) purchasePrice = Math.round(purchasePrice * USD_KZT_RATE);
+    else { skippedUsdRows++; purchasePrice = 0; }
+  }
+
   if (purchasePrice > 100) {
     const title = fullName || name;
+    const shortName = (name || title).trim();
     if (title && title.length >= 3) {
       const tokens = tokenize(title);
       if (tokens.length > 0) {
@@ -326,10 +290,13 @@ for (let idx = 0; idx < catalogRows.length; idx++) {
         const startsWithPart = RE_PARTS_PREFIX.test(title);
         const hasPrimaryDevice = RE_PRIMARY.test(coreTitle) || RE_MFP_MODEL_SERIES.test(coreTitle);
         const isPart = RE_ACCESSORY.test(coreTitle);
-        const isInstallHardware = /(?:суппорт|соединител|кабель-канал|доводчик|заглушк|кронштейн|креплен|подставк|стойк|монтажн[а-я]*[ \t]+панел)/i.test(title);
+        // Фурнитура/бытовая техника определяются по НАЧАЛУ короткого названия и по целым словам:
+        // иначе «VESA крепление» в описании монитора или «эКРАН» (кран) делали товар аксессуаром
+        const isInstallHardware = /^(?:суппорт|соединител|кабель-канал|доводчик|заглушк|кронштейн|креплен|подставк|стойк|монтажн[а-я]*[ \t]+панел)/i.test(shortName) ||
+          (!hasPrimaryDevice && makeWordRegex('кронштейн[а-я]*|крепление|подставк[а-я]*|кабель-канал[а-я]*').test(shortName));
         const isSmartWatch = /(?:смарт[ \t]*часы|smart[ \t]*watch|фитнес[ \t]*браслет)/i.test(title);
         const isIntercom = /(?:домофон|видеодомофон)/i.test(title);
-        const isHomeAppliance = /(?:весы|чайник|утюг|пылесос|фен|блендер|миксер|тостер|кран|водонагревател)/i.test(title);
+        const isHomeAppliance = makeWordRegex('весы|чайник[а-я]*|утюг[а-я]*|пылесос[а-я]*|фен|блендер[а-я]*|миксер[а-я]*|тостер[а-я]*|смеситель|водонагревател[а-я]*').test(shortName);
 
         const isAcc = is3DOrPos || startsWithPart || isInstallHardware || isHomeAppliance || (isPart && !hasPrimaryDevice);
         const isMFP = !isAcc && (RE_MFP_MODEL_SERIES.test(coreTitle) || RE_MFP_FEATURE.test(coreTitle));
@@ -362,20 +329,26 @@ for (let idx = 0; idx < catalogRows.length; idx++) {
           isDesktop: !!isDesktop,
           isPhone: !!isPhone,
           isFlashDrive: !!isFlashDrive,
-          isColor: RE_COLOR.test(title),
-          isMono: RE_MONO.test(title),
+          isColor: detectColorMode(title) === 'color',
+          isMono: detectColorMode(title) === 'mono',
           isLaptop: !isAcc && RE_LAPTOP.test(title) && !/(?:рюкзак|сумк|чехол|папк|портфель)/i.test(title),
-          isAIO: RE_AIO.test(title),
-          isServer: RE_SERVER.test(title),
+          isAIO: !isAcc && !isMFP && RE_AIO.test(title),
+          isServer: !isAcc && RE_SERVER.test(title),
           hasPoE: RE_POE.test(title),
           isUnmanaged: RE_UNMANAGED.test(title),
           isRouter: RE_ROUTER.test(title) && !RE_SWITCH.test(title),
           isSwitch: RE_SWITCH.test(title) && !RE_ROUTER.test(title),
           isDigitizer: /huion|xp-pen|wacom|дигитайзер|перо\s+без\s+батареи|уровн[а-я]*\s+давления|графический\s+планшет/i.test(title),
-          isTabletPC: /ipad|galaxy\s*tab|lenovo\s*tab|mediapad|планшетный\s*компьютер/i.test(title)
+          isTabletPC: /ipad|galaxy\s*tab|lenovo\s*tab|mediapad|matepad|redmi\s*pad|xiaomi\s*pad|планшетный\s*компьютер/i.test(title),
+          // Новые ИТ-категории (раньше поля отсутствовали, и хард-локи отсекали ВСЕ товары)
+          isUPS: !isAcc && RE_UPS.test(shortName) && !/^(?:аккумулятор|батаре|сменн)/i.test(shortName),
+          isProjector: !isAcc && RE_PROJECTOR.test(shortName) && !/^(?:экран|лампа|кронштейн|пульт|потолочн)/i.test(shortName),
+          isCamera: !isAcc && RE_CAMERA.test(shortName) && !/^(?:кронштейн|корпус|коробк|блок[ \t]+питания|объектив)/i.test(shortName),
+          isAccessPoint: !isAcc && RE_ACCESS_POINT.test(shortName) && !/^(?:антенн|инжектор|кронштейн)/i.test(shortName)
         };
 
-        prodObj.isPrimaryProd = prodObj.isMFP || prodObj.isPrinterOnly || prodObj.isLaptop || prodObj.isAIO || prodObj.isDesktop || prodObj.isMonitor || prodObj.isTabletPC || prodObj.isServer || prodObj.isSwitch || prodObj.isRouter || prodObj.isPhone || prodObj.isFlashDrive;
+        prodObj.isPrimaryProd = prodObj.isMFP || prodObj.isPrinterOnly || prodObj.isLaptop || prodObj.isAIO || prodObj.isDesktop || prodObj.isMonitor || prodObj.isTabletPC || prodObj.isServer || prodObj.isSwitch || prodObj.isRouter || prodObj.isPhone || prodObj.isFlashDrive ||
+          prodObj.isUPS || prodObj.isProjector || prodObj.isCamera || prodObj.isAccessPoint;
 
         products.push(prodObj);
 
@@ -406,14 +379,19 @@ function getIDF(tok) {
   return Math.log(1 + (totalCatalogDocs / (df + 1)));
 }
 
-console.log(`[PRE-FILTER V5.3-ROBUST] Индексировано: ${products.length} товаров (первичных: ${primaryIndices.length}, аксессуаров: ${accessoryIndices.length}), ${tokenIndex.size} уникальных токенов.`);
+console.log(`[PRE-FILTER V5.4] Индексировано: ${products.length} товаров (первичных: ${primaryIndices.length}, аксессуаров: ${accessoryIndices.length}), ${tokenIndex.size} уникальных токенов.` +
+  (skippedUsdRows ? ` Пропущено строк в USD без курса USD_KZT_RATE: ${skippedUsdRows}.` : ''));
 
 // 2. ФИЛЬТРАЦИЯ ЛОТОВ ГОСЗАКУПОК
 const output = [];
 
 for (const lot of recentLots) {
   const lotDisplayNum = String(lot.lotNumber || lot.trdBuyNumberAnno || lot.id || '');
-  if (!lotDisplayNum || sentLotIds.has(lotDisplayNum)) continue;
+  if (!lotDisplayNum) continue;
+  const lotKeys = [lotDisplayNum].concat(tsLotKeys(lot));
+  if (lotKeys.some(k => sentLotIds.has(k)) || tsIsKnownLot(registry, lotKeys)) continue;
+  // ТЗ ещё не прочитано (очередь Document Extraction) — проверим в следующем цикле
+  if (lot.docPending) { skippedDocPending++; continue; }
 
   const lotBudget = parseFloat(lot.amount) || 0;
   const lotQty = parseInt(lot.count) || 1;
@@ -421,33 +399,40 @@ for (const lot of recentLots) {
   const lotNameOnly = lot.nameRu || '';
   const lotDescOnly = lot.descriptionRu || '';
   const lotEnriched = (lot.enrichedDesc || '').trim();
+  const lotDocSpec = (lot.docSpecText || '').trim();
   const fullLotText = (lotEnriched || (lotNameOnly + ' ' + lotDescOnly)).trim();
-  const rawTitle = lotNameOnly + ' ' + lotDescOnly + (lotEnriched ? ' ' + lotEnriched : '');
-  const MAX_BUDGET_LIMIT = 10000000;
-  if (lotBudget < 30000 || lotBudget > MAX_BUDGET_LIMIT || !rawTitle.trim()) continue;
+  // classText — название + краткое описание портала: по нему определяется КАТЕГОРИЯ лота
+  // rawTitle — плюс ТТХ из PDF: для поиска кандидатов и требований (A3, PoE, цветность)
+  const classText = (lotNameOnly + ' ' + lotDescOnly).trim();
+  const rawTitle = (classText + (lotDocSpec ? ' ' + lotDocSpec : '')).trim();
+  if (lotBudget < TS_CONFIG.MIN_LOT_BUDGET || lotBudget > TS_CONFIG.MAX_LOT_BUDGET || !rawTitle) continue;
 
-  // ХАРД-ЛОК: Отсечение заведомо не-ИТ закупок
-  if (RE_NON_IT_LOT.test(lotNameOnly) || RE_NON_IT_LOT.test(fullLotText)) {
-    continue;
-  }
+  // ХАРД-ЛОК: Отсечение заведомо не-ИТ закупок (по названию и описанию портала, не по PDF)
+  if (tsIsNonItText(lotNameOnly) || tsIsNonItText(lotDescOnly)) continue;
 
   // ПОЗИТИВНАЯ ПРОВЕРКА ДЛЯ СЛОВА "ГАРНИТУР":
-  if (/гарнитур[а-я]*/i.test(lotNameOnly) || /гарнитур[а-я]*/i.test(fullLotText)) {
-    const hasFurniture = RE_FURNITURE.test(lotNameOnly) || RE_FURNITURE.test(fullLotText);
-    const hasPositiveHeadset = RE_HEADSET_POSITIVE.test(lotNameOnly) || RE_HEADSET_POSITIVE.test(fullLotText);
-    if (hasFurniture || !hasPositiveHeadset) {
-      continue;
-    }
+  if (/гарнитур[а-я]*/i.test(classText)) {
+    const hasFurniture = RE_FURNITURE.test(classText);
+    const hasPositiveHeadset = RE_HEADSET_POSITIVE.test(rawTitle);
+    if (hasFurniture || !hasPositiveHeadset) continue;
   }
 
-  const directUrl = 'https://goszakup.gov.kz/ru/search/lots?filter%5Bcustomer%5D=&filter%5Bnumber%5D=' + encodeURIComponent(lot.lotNumber || lotDisplayNum);
+  const directUrl = lot.trdBuyId
+    ? 'https://goszakup.gov.kz/ru/announce/index/' + encodeURIComponent(lot.trdBuyId)
+    : 'https://goszakup.gov.kz/ru/search/lots?filter%5Bcustomer%5D=&filter%5Bnumber%5D=' + encodeURIComponent(lot.lotNumber || lotDisplayNum);
+  const lotMeta = {
+    endDate: lot.endDate || null,
+    trdBuyId: lot.trdBuyId || null,
+    isManualReviewRequired: !!lot.isManualReviewRequired,
+    docExtractionError: lot.docExtractionError || null
+  };
 
   // ФИЛЬТР 1: ВЕНДОР-ЛОКИ
   let isLocked = false;
   for (const vl of VENDOR_LOCK_PATTERNS) {
     if (vl.regex.test(rawTitle)) {
       output.push({
-        json: {
+        json: Object.assign({
           chatId,
           categoryTag: 'locked',
           isVendorLocked: true,
@@ -459,7 +444,7 @@ for (const lot of recentLots) {
           directUrl,
           lockReason: vl.name,
           profit: 0
-        }
+        }, lotMeta)
       });
       isLocked = true;
       break;
@@ -467,7 +452,7 @@ for (const lot of recentLots) {
   }
   if (isLocked) continue;
 
-  // ШАГ 2: СЛИЯНИЕ С RETRIEVAL - токены лота строятся из полного обогащенного текста (rawTitle)
+  // ШАГ 2: RETRIEVAL - токены лота строятся из названия, описания и ТТХ файла (без служебных заголовков)
   const lotTokens = tokenize(rawTitle);
   if (lotTokens.length === 0) continue;
   const lotNameTokens = new Set(tokenize(lotNameOnly));
@@ -475,49 +460,59 @@ for (const lot of recentLots) {
   const isCartridgeOnlyLot = makeWordRegex('картридж[а-я]*|тонер[а-я]*|драм[а-я]*|чернил[а-я]*|фотобарабан[а-я]*|туба|термопленк[а-я]*').test(lotNameOnly);
 
   const lotHasA3 = RE_A3.test(rawTitle);
-  const lotHasMfpNegation = RE_MFP_NEGATION.test(rawTitle);
+  const lotHasMfpNegation = RE_MFP_NEGATION.test(classText);
   let lotIsMFP = false;
   if (isCartridgeOnlyLot) {
     lotIsMFP = false;
-  } else if (lotHasMfpNegation && !makeWordRegex('мфу|3-в-1|3[ \t]*в[ \t]*1|all-in-one|многофункциональн[а-я]*|imagerunner|mfp').test(rawTitle)) {
+  } else if (lotHasMfpNegation && !makeWordRegex('мфу|3-в-1|3[ \t]*в[ \t]*1|all-in-one|многофункциональн[а-я]*|imagerunner|mfp').test(classText)) {
     lotIsMFP = false;
   } else {
-    lotIsMFP = RE_MFP_MODEL_SERIES.test(rawTitle) || RE_MFP_FEATURE.test(rawTitle);
+    lotIsMFP = RE_MFP_MODEL_SERIES.test(classText) || RE_MFP_FEATURE.test(classText);
   }
 
-  const lotIsPrinterOnly = !isCartridgeOnlyLot && RE_PRINTER.test(rawTitle) && !lotIsMFP;
-  const lotIsColor = RE_COLOR.test(rawTitle);
-  const lotIsMono = RE_MONO.test(rawTitle) && !lotIsColor;
-  const lotIsLaptop = RE_LAPTOP.test(rawTitle);
-  const lotIsAIO = RE_AIO.test(rawTitle);
-  const lotIsDesktop = (
-    RE_DESKTOP.test(rawTitle) ||
-    (makeWordRegex('компьютер[а-я]*').test(lotNameOnly) && !lotIsLaptop && !lotIsAIO && !RE_TABLET_PC.test(rawTitle))
-  ) && !lotIsLaptop && !lotIsAIO;
-  const lotIsServer = RE_SERVER.test(rawTitle);
-  const lotRequiresPoE = RE_POE.test(rawTitle);
-  const lotRequiresManaged = RE_MANAGED.test(rawTitle);
-  const lotIsRouter = RE_ROUTER.test(rawTitle) && !RE_SWITCH.test(rawTitle);
-  const lotIsSwitch = RE_SWITCH.test(rawTitle) && !RE_ROUTER.test(rawTitle);
-  const lotIsMonitor = RE_MONITOR.test(rawTitle) && !lotIsAIO && !lotIsLaptop;
-  const lotIsPhone = (makeWordRegex('телефон[а-я]*|смартфон[а-я]*').test(lotNameOnly) || /(?:сотовый|мобильный)\s*телефон|смартфон/i.test(rawTitle)) && !/для\s*(?:зарядки|подключения|питания)\s*(?:телефонов|смартфонов)/i.test(rawTitle);
-  const lotIsFlash = RE_FLASH.test(rawTitle);
+  const lotIsPrinterOnly = !isCartridgeOnlyLot && RE_PRINTER.test(classText) && !lotIsMFP;
+  const lotColorMode = detectColorMode(rawTitle);
+  const lotIsColor = lotColorMode === 'color';
+  const lotIsMono = lotColorMode === 'mono';
 
-  const lotIsTabletPC = RE_TABLET_PC.test(rawTitle) || (makeWordRegex('планшет[а-я]*').test(lotNameOnly) && !RE_DIGITIZER.test(rawTitle) && lotBudgetPerUnit >= 60000);
-  const lotIsDigitizerOnly = RE_DIGITIZER.test(rawTitle) && !RE_TABLET_PC.test(rawTitle);
+  const lotIsLaptop = RE_LAPTOP.test(classText) || /портативн[а-я]*[ \t]+компьютер|компьютер[ \t]+портативн/i.test(lotNameOnly);
+  const lotIsAIO = !lotIsMFP && !lotIsPrinterOnly && RE_AIO.test(classText);
+  const lotIsTabletPC = !lotIsLaptop && (RE_TABLET_PC.test(classText) ||
+    (makeWordRegex('планшет[а-я]*').test(lotNameOnly) && !RE_DIGITIZER.test(rawTitle) && lotBudgetPerUnit >= 60000));
+  const lotIsDigitizerOnly = RE_DIGITIZER.test(rawTitle) && !lotIsTabletPC;
+  const lotNameStartsMonitor = /^монитор/i.test(lotNameOnly.trim());
+  const lotIsDesktop = !lotIsLaptop && !lotIsAIO && !lotIsTabletPC && !lotNameStartsMonitor && (
+    RE_DESKTOP.test(classText) ||
+    (makeWordRegex('компьютер[а-я]*').test(lotNameOnly) && !/планшетн|карманн|портативн/i.test(lotNameOnly))
+  );
+  const lotIsServer = RE_SERVER.test(classText) && !makeWordRegex('шкаф[а-я]*|стойк[а-я]*').test(lotNameOnly);
+  const lotIsRouter = RE_ROUTER.test(classText) && !RE_SWITCH.test(classText);
+  const lotIsSwitch = RE_SWITCH.test(classText) && !RE_ROUTER.test(classText);
+  // Монитор внутри комплекта ПК — не отдельная категория (иначе комплект не находил кандидатов)
+  const lotIsMonitor = RE_MONITOR.test(classText) && !lotIsAIO && !lotIsLaptop && !lotIsDesktop;
+  const lotIsPhone = (makeWordRegex('телефон[а-я]*|смартфон[а-я]*').test(lotNameOnly) || /(?:сотовый|мобильный)\s*телефон|смартфон/i.test(classText)) && !/для\s*(?:зарядки|подключения|питания)\s*(?:телефонов|смартфонов)/i.test(classText);
 
-  // Классификация лота по новым IT-категориям:
-  const lotIsUPS = RE_UPS.test(rawTitle) && !makeWordRegex('аккумулятор[а-я]*|батаре[яеи][а-я]*|замена[ \t]+батаре[ий]').test(rawTitle);
-  const lotIsProjector = RE_PROJECTOR.test(rawTitle) && !makeWordRegex('экран[а-я]*|полотно|кронштейн[а-я]*|лампа[ \t]+для[ \t]+проектора').test(rawTitle);
-  const lotIsCamera = RE_CAMERA.test(rawTitle) && !makeWordRegex('монтаж|установка|обслуживание|кронштейн[а-я]*|коробк[а-я]*').test(rawTitle);
-  const lotIsAccessPoint = RE_ACCESS_POINT.test(rawTitle) && !makeWordRegex('монтаж|настройка').test(rawTitle);
+  const hasCoreDevice = lotIsMFP || lotIsPrinterOnly || lotIsLaptop || lotIsAIO || lotIsDesktop || lotIsMonitor || lotIsServer || lotIsTabletPC || lotIsPhone;
+  const lotIsFlash = !hasCoreDevice && RE_FLASH.test(classText);
+
+  // Новые ИТ-категории — только если лот не является основным устройством
+  // (веб-камера ноутбука, режим «точка доступа» роутера, аккумулятор ИБП больше не ломают отбор)
+  const lotIsUPS = !hasCoreDevice && RE_UPS.test(classText) && !/^(?:аккумулятор|батаре|сменн|замена)/i.test(lotNameOnly.trim());
+  const lotIsProjector = !hasCoreDevice && RE_PROJECTOR.test(classText) && !/^(?:экран|полотно|кронштейн|лампа|крепл)/i.test(lotNameOnly.trim());
+  const lotIsCamera = !hasCoreDevice && RE_CAMERA.test(classText) && !makeWordRegex('монтаж[а-я]*|установк[а-я]*|обслуживани[а-я]*').test(lotNameOnly) && !/^(?:кронштейн|коробк)/i.test(lotNameOnly.trim());
+  const lotIsAccessPoint = !hasCoreDevice && !lotIsRouter && !lotIsSwitch && RE_ACCESS_POINT.test(classText) && !makeWordRegex('монтаж[а-я]*|настройк[а-я]*').test(lotNameOnly);
+
+  const lotRequiresPoE = RE_POE.test(rawTitle) && !/без[ \t]+poe|poe[ \t]*[:–-]?[ \t]*(?:нет|отсутств)/i.test(rawTitle);
+  const lotRequiresManaged = RE_MANAGED.test(rawTitle) && !RE_UNMANAGED.test(classText);
 
   const hasPrinterOrMFP = (lotIsMFP || lotIsPrinterOnly) && !isCartridgeOnlyLot;
-  const hasCartridge = RE_ACCESSORY.test(rawTitle) && makeWordRegex('картридж[а-я]*|тонер[а-я]*').test(rawTitle);
+  // «Стартовый картридж в комплекте» — не требование поставки расходников
+  const classNoStarter = classText.replace(/стартов[а-я]*[ \t]+(?:картридж|тонер)[а-я]*/gi, ' ');
+  const hasCartridge = makeWordRegex('картридж[а-я]*|тонер[а-я]*').test(classNoStarter);
   const isPrinterBundle = hasPrinterOrMFP && hasCartridge && !isCartridgeOnlyLot;
 
   const hasPC = lotIsDesktop || lotIsAIO;
-  const hasKBMOrMon = makeWordRegex('монитор[а-я]*|клавиатур[а-я]*|мышь').test(rawTitle);
+  const hasKBMOrMon = makeWordRegex('монитор[а-я]*|клавиатур[а-я]*|мышь|мыши').test(classText);
   const isPCBundle = hasPC && hasKBMOrMon;
   const isBundle = isPrinterBundle || isPCBundle;
 
@@ -528,6 +523,7 @@ for (const lot of recentLots) {
   else if (hasPrinterOrMFP) categoryTag = 'printer_mfp';
   else if (lotIsDesktop || lotIsLaptop || lotIsAIO) categoryTag = 'computer';
   else if (lotIsTabletPC || lotIsDigitizerOnly) categoryTag = 'tablet';
+  else if (lotIsServer) categoryTag = 'server';
   else if (lotIsRouter || lotIsSwitch) categoryTag = 'network';
   else if (lotIsPhone) categoryTag = 'phone';
   else if (lotIsFlash) categoryTag = 'flash';
@@ -535,7 +531,7 @@ for (const lot of recentLots) {
   else if (lotIsProjector) categoryTag = 'projector';
   else if (lotIsCamera) categoryTag = 'camera';
   else if (lotIsAccessPoint) categoryTag = 'network';
-  else if (isCartridgeOnlyLot || RE_ACCESSORY.test(rawTitle)) categoryTag = 'cartridge_part';
+  else if (isCartridgeOnlyLot || RE_ACCESSORY.test(classText)) categoryTag = 'cartridge_part';
 
   const candidateHits = new Map();
   const candidateScores = new Map();
@@ -574,6 +570,7 @@ for (const lot of recentLots) {
       // stock check removed for Solo mode
 
       if (!prod.isAcc) {
+        if (!prod.isPrimaryProd) continue;
         if (lotHasA3 && (!prod.hasA3 || prod.price < 250000)) continue;
         if (lotIsMFP && prod.isPrinterOnly) continue;
         if (lotIsPrinterOnly && prod.isMFP) continue;
@@ -591,6 +588,7 @@ for (const lot of recentLots) {
 
         if (hits >= 2 || idfScore >= 6.0) {
           primaryScored.push({
+            distributor: prod.distributor || 'Al-Style',
             code: prod.code,
             name: prod.name,
             fullName: prod.fullName || prod.name,
@@ -612,6 +610,7 @@ for (const lot of recentLots) {
       } else {
         if (hits >= 1 || idfScore >= 4.0) {
           accessoryScored.push({
+            distributor: prod.distributor || 'Al-Style',
             code: prod.code,
             name: prod.name,
             fullName: prod.fullName || prod.name,
@@ -660,20 +659,21 @@ for (const lot of recentLots) {
       "КАНДИДАТЫ СО СКЛАДА (ДОПОЛНИТЕЛЬНЫЕ РАСХОДНИКИ / КОМПЛЕКТУЮЩИЕ):\n" +
       JSON.stringify(topAccessoryForAi, null, 2) + "\n\n" +
       "ПРАВИЛА АУДИТА:\n" +
-      "1. ПРОВЕРКА КОМПЛЕКТАЦИИ. Если ТЗ требует поставку основного устройства и расходников — кандидат обязан содержать обе позиции.\n" +
+      "1. ПРОВЕРКА КОМПЛЕКТАЦИИ. Если ТЗ требует поставку основного устройства и расходников — кандидат обязан содержать обе позиции. Стартовый картридж, входящий в комплект устройства, отдельной позицией не считается.\n" +
       "2. ЗАПРЕТ ПОДМЕНЫ ФУНКЦИОНАЛЬНОГО КЛАССА. Нельзя заменять МФУ на принтер или наоборот.\n" +
-      "3. ФОРМАТ verdict. Дай короткое (1–3 предложения) юридически обоснованное объяснение решения со ссылкой на пункт ТЗ.\n\n" +
+      "3. ВЫБОР КОДОВ. selectedPrimaryCode и selectedAccessoryCodes — ТОЛЬКО коды из списков выше, символ в символ. Если подходящего кандидата нет — isCompatible: false.\n" +
+      "4. lotId — верни ID лота из данных выше без изменений.\n" +
+      "5. ФОРМАТ verdict. Дай короткое (1–3 предложения, до 300 символов) обоснование со ссылкой на пункт ТЗ.\n\n" +
       "Ответь строго по JSON-схеме, без пояснений вне JSON.";
 
     output.push({
       json: {
         categoryTag,
         chatId,
-        geminiKey,
-        tradeMethodId: lot.refTradeMethodsId || 3,
+        tradeMethodId: Number(lot.refTradeMethodsId || 3),
+        staleCatalog: isCatalogStale,
         isBundle: true,
         isVendorLocked: false,
-        isManualReviewRequired: !!lot.isManualReviewRequired,
         lotId: String(lotDisplayNum),
         lotName: lotNameOnly,
         lotDesc: fullLotText,
@@ -689,7 +689,8 @@ for (const lot of recentLots) {
         vatPayable: baseFin.vatPayable,
         citPayable: baseFin.citPayable,
         logisticsCost: baseFin.logisticsCost,
-        geminiPrompt
+        geminiPrompt,
+        ...lotMeta
       }
     });
 
@@ -723,6 +724,9 @@ for (const lot of recentLots) {
 
       if (lotIsRouter && prod.isSwitch) continue;
       if (lotIsSwitch && prod.isRouter) continue;
+      // PoE и управляемость (раньше вычислялись, но не применялись)
+      if ((lotIsSwitch || lotIsAccessPoint) && lotRequiresPoE && !prod.hasPoE) continue;
+      if (lotIsSwitch && lotRequiresManaged && prod.isUnmanaged) continue;
 
       if (lotIsPhone && !prod.isPhone) continue;
       if (!lotIsPhone && prod.isPhone) continue;
@@ -779,12 +783,6 @@ for (const lot of recentLots) {
       let titleHits = 0;
       for (const t of prod.tokenSet) {
         if (lotNameTokens.has(t)) titleHits++;
-      }
-
-      // Детерминированная проверка ТТХ до финансовых расчетов
-      if (typeof checkDeterministicCompliance === 'function') {
-        const detCheck = checkDeterministicCompliance(fullLotText, prod.name);
-        if (!detCheck.pass) continue;
       }
 
       const fin = evaluateFinancials(lotBudget, prod.price, lotQty, prod.name);
@@ -855,23 +853,19 @@ for (const lot of recentLots) {
       "1. ЗАПРЕТ ПОДМЕНЫ ФУНКЦИОНАЛЬНОГО КЛАССА. МФУ (3-в-1: печать, сканирование, копирование) КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО заменять на однофункциональный принтер (только печать), и наоборот. Нельзя заменять монитор на кронштейн или мышь. Нельзя заменять ПК на кабельную фурнитуру.\n\n" +
       "2. ФОРМАТ И ХАРАКТЕРИСТИКИ ПЕЧАТИ. Если лот требует формат А3 — принтер А4 недопустим. Если цветную печать — монохромный недопустим. Для картриджей и тонеров: строго проверять модель (CF259A, 59A и др.), ресурс и обязательное наличие чипа (если ТЗ требует чип, картриджи «Без чипа» КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ).\n\n" +
       "3. ЗАПРЕТ ПОДМЕНЫ ПЛАНШЕТНОГО ПК ГРАФИЧЕСКИМ ПЕРОМ. Если в ТЗ лота требуется автономный планшетный компьютер с ОС — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО сопоставлять с графическими дигитайзерами без ОС.\n\n" +
-      "4. ПРОЕКТНЫЕ VAD-БРЕНДЫ. Если ТЗ требует Fortinet, Cisco, CheckPoint либо MAF — ставь isCompatible: false, matchBadge: \"🔴 ТРЕБУЕТСЯ VAD\", rnuRisk: \"ВЫСОКИЙ РИСК РНУ\".\n\n" +
-      "5. КОРРУПЦИОННЫЙ ЗАХВАТ («АНТИ-ЗАТОЧКА»). Маркеры заточки под конкретного поставщика — ставь rnuRisk: \"ВЫСОКИЙ РИСК РНУ: КОРРУПЦИОННАЯ ЗАТОЧКА\", isCompatible: false:\n" +
-      "   - требование согласования по личному WhatsApp;\n" +
-      "   - указание конкретной модели/бренда без обязательной формулировки «или эквивалент»;\n" +
-      "   - расхождение наименования лота и содержания ТЗ.\n\n" +
-      "6. СОГЛАСОВАННОСТЬ ОТВЕТА. Если isCompatible: false — selectedCode обязан быть null.\n\n" +
-      "7. ФОРМАТ verdict. Дай короткое (1–3 предложения) юридически обоснованное объяснение решения со ссылкой на пункт ТЗ.\n\n" +
+      "4. ПРОЕКТНЫЕ VAD-БРЕНДЫ. Если ТЗ требует Fortinet, Cisco, CheckPoint либо MAF/авторизационное письмо производителя — ставь isCompatible: false, matchBadge: \"🔴 ТРЕБУЕТСЯ VAD\", rnuRisk: \"ВЫСОКИЙ РИСК РНУ\".\n\n" +
+      "5. КОНКРЕТНЫЙ БРЕНД/МОДЕЛЬ В ТЗ. Если ТЗ называет бренд/модель без «или эквивалент»: (а) если выбранный кандидат — именно этот бренд/модель, это НЕ препятствие: isCompatible по ТТХ, rnuRisk: \"НЕТ РИСКА\", упомяни это в verdict; (б) если у кандидатов другой бренд — isCompatible: false, matchBadge: \"🔴 НЕ ПОДХОДИТ\". Спецификация ниже сжата: отсутствие фразы «или эквивалент» в сжатом тексте само по себе не доказывает заточку.\n\n" +
+      "6. КОРРУПЦИОННЫЕ МАРКЕРЫ. Требование согласования по личному WhatsApp/телефону, предоставления образца до подписания договора — rnuRisk: \"ВЫСОКИЙ РИСК РНУ: КОРРУПЦИОННАЯ ЗАТОЧКА\", isCompatible: false, matchBadge: \"🔴 РИСК РНУ\".\n\n" +
+      "7. ВЫБОР КОДА. selectedCode — ТОЛЬКО код из списка кандидатов, символ в символ. Если isCompatible: false — selectedCode: null. lotId — верни ID лота из данных выше без изменений.\n\n" +
+      "8. ФОРМАТ verdict. Дай короткое (1–3 предложения, до 300 символов) обоснование со ссылкой на пункт ТЗ.\n\n" +
       "Ответь строго по JSON-схеме, без пояснений вне JSON.";
 
     output.push({
       json: {
         categoryTag,
         chatId,
-        geminiKey,
         isBundle: false,
         isVendorLocked: false,
-        isManualReviewRequired: !!lot.isManualReviewRequired,
         staleCatalog: isCatalogStale,
         tradeMethodId: Number(lot.refTradeMethodsId || lot.tradeMethodId || 3),
         lotId: String(lotDisplayNum),
@@ -888,7 +882,8 @@ for (const lot of recentLots) {
         vatPayable: bestFin.vatPayable,
         citPayable: bestFin.citPayable,
         logisticsCost: bestFin.logisticsCost,
-        geminiPrompt
+        geminiPrompt,
+        ...lotMeta
       }
     });
   }
@@ -897,6 +892,7 @@ for (const lot of recentLots) {
 // ШАГ 7: КВОТИРОВАНИЕ НА УРОВНЕ ЛОТОВ (ANTI-STARVATION FAIR LOT SELECTION)
 output.sort((a, b) => (b.json.profit || 0) - (a.json.profit || 0));
 
+// Не более 5 лотов на категорию, затем добор до 30 из переполнения; остальные — в следующий цикл
 const MAX_LOTS_PER_CATEGORY = 5;
 const TOTAL_LOTS_LIMIT = 30;
 const categoryCounts = new Map();
@@ -918,8 +914,16 @@ while (selectedLots.length < TOTAL_LOTS_LIMIT && overflowLots.length > 0) {
   selectedLots.push(overflowLots.shift());
 }
 
+const deferredLots = overflowLots.length;
+console.log(`[PRE-FILTER] Кандидатов для ИИ: ${selectedLots.filter(l => !l.json.isVendorLocked).length} | Вендор-локов: ${selectedLots.filter(l => l.json.isVendorLocked).length} | ` +
+  `Отложено до след. цикла: ${deferredLots} | Ждут чтения ТЗ: ${skippedDocPending}`);
+
 if (selectedLots.length === 0) {
-  return [{ json: { empty: true, chatId } }];
+  return [{ json: { empty: true, chatId, deferredLots, skippedDocPending } }];
+}
+if (deferredLots || skippedDocPending) {
+  selectedLots[0].json.deferredLots = deferredLots;
+  selectedLots[0].json.skippedDocPending = skippedDocPending;
 }
 
 return selectedLots;

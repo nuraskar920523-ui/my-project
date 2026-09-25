@@ -33,11 +33,9 @@ if (!targetPath) {
   }];
 }
 
-const t0 = Date.now();
 const ageHours = mtime ? (Date.now() - mtime) / (1000 * 60 * 60) : 999;
 const staleCatalog = ageHours > 48;
 
-let count = 0;
 try {
   const stat = fs.statSync(targetPath);
   // Быстрая проверка размера
@@ -53,6 +51,7 @@ return [{
     catalogReady: true,
     catalogLoadError: false,
     staleCatalog,
+    catalogAgeHours: +ageHours.toFixed(1),
     catalogMtime: mtime,
     catalogPath: targetPath
   }
