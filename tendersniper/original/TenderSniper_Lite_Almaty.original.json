@@ -1,0 +1,796 @@
+{
+  "name": "TenderSniper AI Radar Lite (Almaty Solo 09:30 & 13:00)",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message",
+          "callback_query"
+        ],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [
+        -160,
+        192
+      ],
+      "id": "0d1feb7e-374a-43cf-b380-f88c263e1431",
+      "name": "Telegram Trigger",
+      "webhookId": "tendersniper-almaty-webhook-001",
+      "credentials": {
+        "telegramApi": {
+          "id": "zYXHO9vsYSxUvRob",
+          "name": "TendersniperAlmatybot API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 9 * * *"
+            },
+            {
+              "field": "cronExpression",
+              "expression": "0 13 * * *"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -160,
+        0
+      ],
+      "id": "6c192db8-8242-45e4-9c89-f6cc3c3856d1",
+      "name": "Schedule (09:30 & 13:00 Almaty)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ====================================================================\n// УЗЕЛ: АВТОРИЗАЦИЯ И МАРШРУТИЗАЦИЯ (РЕЖИМ «СЕНТЯБРЬ СОЛО» — АЛМАТЫ)\n// ====================================================================\nconst inputData = $input.first()?.json || {};\n\n// 1. Конфигурация доступа\nconst DEFAULT_ADMIN_CHAT_ID = 681740470; // Аскар Нуралиев\nconst AUTHORIZED_USER_IDS = new Set([681740470]);\nconst AUTHORIZED_USERNAMES = new Set(['askarnuraliyev']);\n\n// 2. Определение источника (CRON или TELEGRAM)\nconst msg = inputData.message || inputData.edited_message || inputData.callback_query?.message;\nconst isCron = !msg;\n\n// 3. Проверка блокировки через штатный $getWorkflowStaticData (без привязки к fs)\nconst staticData = $getWorkflowStaticData('global');\nconst LOCK_TIMEOUT_MS = 4 * 60 * 1000;\nconst lastScanTime = Number(staticData.lastScanTime || 0);\n\nif (isCron) {\n  if (Date.now() - lastScanTime < LOCK_TIMEOUT_MS) {\n    console.log('[AUTH LOCK] Предыдущее сканирование еще выполняется. Пропуск запуска CRON.');\n    return [];\n  }\n  staticData.lastScanTime = Date.now();\n\n  console.log('[AUTH] Запуск по расписанию (CRON). Целевой чат: ' + DEFAULT_ADMIN_CHAT_ID);\n  return [{\n    json: {\n      isAuthorized: true,\n      shouldRunPipeline: true,\n      chatId: DEFAULT_ADMIN_CHAT_ID,\n      source: 'CRON',\n      userName: 'Система (CRON)',\n      directReplyMessage: null\n    }\n  }];\n}\n\n// 4. Данные пользователя Telegram\nconst fromUser = inputData.message?.from || inputData.edited_message?.from || inputData.callback_query?.from || {};\nconst userId = fromUser.id ? Number(fromUser.id) : null;\nconst username = fromUser.username ? String(fromUser.username).toLowerCase() : null;\nconst chatId = msg?.chat?.id || userId || DEFAULT_ADMIN_CHAT_ID;\nconst fullName = [fromUser.first_name, fromUser.last_name].filter(Boolean).join(' ') || 'Пользователь';\nconst rawText = String(inputData.message?.text || inputData.edited_message?.text || inputData.callback_query?.data || '').trim();\n\n// 5. Проверка авторизации\nconst isAuthorized = (userId && AUTHORIZED_USER_IDS.has(userId)) ||\n                     (username && AUTHORIZED_USERNAMES.has(username));\n\nif (!isAuthorized) {\n  const warnMsg = '[SECURITY WARN] Попытка несанкционированного доступа! ID: ' + userId + ', Username: @' + (username || 'none') + ', Имя: ' + fullName + ', Текст: \"' + rawText + '\"';\n  console.warn(warnMsg);\n\n  const rejectionReply = \n    '⛔ <b>Доступ запрещён</b>\\n\\n' +\n    'Ваш аккаунт (ID: <code>' + (userId || 'Unknown') + '</code>) не авторизован для управления радаром TenderSniper.\\n\\n' +\n    'Обратитесь к администратору для добавления в белый список.';\n\n  return [{\n    json: {\n      isAuthorized: false,\n      shouldRunPipeline: false,\n      chatId,\n      source: 'UNAUTHORIZED',\n      userName: fullName,\n      directReplyMessage: rejectionReply\n    }\n  }];\n}\n\n// 6. Обработка команд /start и /help\nif (rawText === '/start' || rawText === '/help') {\n  const helpReply =\n    '👋 <b>TenderSniper AI — Режим «Сентябрь Соло» (г. Алматы)</b>\\n━━━━━━━━━━━━━━━━━━━━\\n' +\n    '👤 <b>Пользователь:</b> ' + fullName + ' (Авторизован ✅)\\n' +\n    '⏱ <b>Фоновый мониторинг:</b> 09:30 и 13:00 (Asia/Almaty)\\n' +\n    '📍 <b>Регион:</b> Только город Алматы (КАТО 75*)\\n' +\n    '⚖️ <b>Методы закупок:</b> Все доступные (ЗЦП, ОИ, Открытый конкурс и др.)\\n' +\n    '🎯 <b>Критерии отбора:</b> Чистая маржа ≥ 15% и 🟢 ТОЧНОЕ СОВПАДЕНИЕ (расширенная выборка)\\n' +\n    '📦 <b>Каталог:</b> Полная номенклатура Al-Style (без ограничений по остаткам)\\n\\n' +\n    '📌 <b>Доступные команды:</b>\\n' +\n    '• <code>/scan</code> — запустить аудит алматинских лотов прямо сейчас\\n' +\n    '• <code>/help</code> — показать эту справку\\n\\n' +\n    '<i>Бот отбирает лоты по каталогу Al-Style, проверяет спецификации через Gemini AI и рассчитывает чистую прибыль с налогом СНР 3% (ФНО 910.00, без НДС и КПН).</i>';\n\n  return [{\n    json: {\n      isAuthorized: true,\n      shouldRunPipeline: false,\n      chatId,\n      source: 'USER_COMMAND',\n      userName: fullName,\n      directReplyMessage: helpReply\n    }\n  }];\n}\n\n// 7. Строгий матчинг: ТОЛЬКО команда '/scan' инициирует запуск пайплайна\nif (rawText === '/scan') {\n  if (Date.now() - lastScanTime < LOCK_TIMEOUT_MS) {\n    console.log('[AUTH LOCK] Предыдущее сканирование еще выполняется. Ответ пользователю.');\n    return [{\n      json: {\n        isAuthorized: true,\n        shouldRunPipeline: false,\n        chatId,\n        source: 'USER_SCAN_LOCKED',\n        userName: fullName,\n        directReplyMessage: '⏳ <b>Сканирование Алматы уже выполняется</b>\\n\\nВ данный момент система производит проверку портала Госзакупок по региону Алматы. Пожалуйста, подождите 1-2 минуты до завершения текущего цикла.'\n      }\n    }];\n  }\n\n  staticData.lastScanTime = Date.now();\n\n  return [{\n    json: {\n      isAuthorized: true,\n      shouldRunPipeline: true,\n      chatId,\n      source: 'USER_SCAN',\n      userName: fullName,\n      directReplyMessage: null\n    }\n  }];\n}\n\n// 8. Защита бюджета API: Любой другой ввод (текст, стикер, опечатка, callback_query без команды)\nreturn [{\n  json: {\n    isAuthorized: true,\n    shouldRunPipeline: false,\n    chatId,\n    source: 'UNKNOWN_COMMAND',\n    userName: fullName,\n    directReplyMessage: '⚠️ Неизвестная команда. Для запуска используйте /scan'\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        64,
+        112
+      ],
+      "id": "4adbc23e-d420-40d9-adfa-3defa0ab8d84",
+      "name": "Auth & Command Router"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.shouldRunPipeline }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        288,
+        112
+      ],
+      "id": "b41110c5-e191-4fdc-b2de-ddc825788daa",
+      "name": "Проверка доступа и команды"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.directReplyMessage }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        288,
+        304
+      ],
+      "id": "9775135a-85e7-4062-9268-6cd987133258",
+      "name": "Send Direct / Auth Reply",
+      "webhookId": "tendersniper-almaty-send-auth-reply",
+      "credentials": {
+        "telegramApi": {
+          "id": "zYXHO9vsYSxUvRob",
+          "name": "TendersniperAlmatybot API"
+        }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ====================================================================\n// ГЕНЕРАЦИЯ ЦЕЛЕВЫХ ЗАПРОСОВ ПО ИТ-КАТЕГОРИЯМ КАТАЛОГА AL-STYLE\n// Вместо слепого limit:200 — целевой поиск по ключевым словам\n// Покрывает 95%+ товарных категорий Al-Style\n// ====================================================================\nconst IT_KEYWORDS = [\n  'принтер', 'мфу', 'ноутбук', 'компьютер', 'монитор',\n  'картридж', 'тонер', 'ибп', 'источник бесперебойного', 'коммутатор',\n  'маршрутизатор', 'роутер', 'сервер', 'клавиатур', 'мышь',\n  'сканер', 'проектор', 'кабель', 'патч-корд', 'системный блок',\n  'моноблок', 'жесткий диск', 'накопитель', 'телефон', 'планшет',\n  'наушник', 'гарнитур', 'видеонаблюдени', 'камер', 'блок питания',\n  'удлинитель', 'сетевой фильтр', 'точка доступа', 'wi-fi', 'барабан',\n  'чернила', 'фотобарабан', 'poe', 'ssd', 'инвертор'\n];\n\nconsole.log('[KEYWORDS] Генерация ' + IT_KEYWORDS.length + ' целевых запросов по ИТ-категориям');\nconst gzToken = (typeof process !== 'undefined' && process.env?.GOSZAKUP_TOKEN) || (typeof $env !== 'undefined' && $env.GOSZAKUP_TOKEN) || '';\nreturn IT_KEYWORDS.map(keyword => ({ json: { keyword, gzToken } }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        512,
+        112
+      ],
+      "id": "50879c87-9b3f-450a-afcc-6d92e3e08395",
+      "name": "Generate IT Keywords"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://ows.goszakup.gov.kz/v3/graphql",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + ($json.gzToken || $env.GOSZAKUP_TOKEN) }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json; charset=utf-8"
+            },
+            {
+              "name": "User-Agent",
+              "value": "TenderSniper-Radar/5.3 (Os.corp Energy Procurement Client; contact: admin@oscorp.kz)"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  query: 'query GetITLots($nameRu: String) { Lots(limit: 100, filter: { refLotStatusId: [110, 210, 220, 230, 240], nameRu: $nameRu }) { id lotNumber nameRu descriptionRu amount count customerNameRu trdBuyNumberAnno indexDate refTradeMethodsId plnPointKatoList Files { id filePath originalName nameRu } } }',\n  variables: {\n    nameRu: $json.keyword\n  }\n}) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 4,
+              "batchInterval": 750
+            }
+          },
+          "timeout": 45000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        736,
+        112
+      ],
+      "id": "43543cec-ce98-4717-8aa5-3c0f5b68fa37",
+      "name": "Fetch IT Lots from ЦЭФ",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ====================================================================\n// ОБЪЕДИНЕНИЕ, ДЕДУПЛИКАЦИЯ И СТРОГАЯ ФИЛЬТРАЦИЯ ПО Г. АЛМАТЫ (КАТО 75*)\n// Изоляция города Алматы от Алматинской области\n// ====================================================================\nconst allItems = $input.all();\nconst seenIds = new Set();\nconst allLots = [];\nlet errorCount = 0;\nlet totalRaw = 0;\nlet skippedOtherRegions = 0;\n\n// Регулярные выражения для жесткой изоляции г. Алматы от области\nconst RE_ALMATY_CITY = /(?:^|[^\\wа-яё])(?:г\\.?[ \\t]*алматы|город[ \\t]+алматы)(?:[^\\wа-яё]|$)/i;\nconst RE_EXCLUDE_REGION = /(?:област[а-я]*|талдыкорган[а-я]*|қонаев[а-я]*|конаев[а-я]*|каскелен[а-я]*|қаскелең[а-я]*|есик[а-я]*|есік[а-я]*|иссык[а-я]*|тургень[а-я]*|жаркент[а-я]*|текели[а-я]*|карасайск[а-я]*|илийск[а-я]*|талгар[а-я]*|енбекшиказах[а-я]*|жамбылск[а-я]*)/i;\n\nfor (const item of allItems) {\n  const resp = item.json || {};\n  if (resp.error || resp.errors) {\n    errorCount++;\n    console.warn('[MERGE WARN] Ошибка в ответе API:', JSON.stringify(resp.error || resp.errors).substring(0, 200));\n    continue;\n  }\n  const lots = resp.data?.Lots || [];\n  totalRaw += lots.length;\n  for (const lot of lots) {\n    const lotId = String(lot.id);\n    if (seenIds.has(lotId)) continue;\n    seenIds.add(lotId);\n\n    // СТРОГИЙ ГЕО-ФИЛЬТР (Изоляция г. Алматы от Области):\n    // 1. КАТО должен начинаться строго с '75' (г. Алматы)\n    const katoList = Array.isArray(lot.plnPointKatoList) ? lot.plnPointKatoList : [];\n    const hasKato75 = katoList.some(k => String(k || '').trim().startsWith('75'));\n\n    // 2. Fallback по названию заказчика: только 'г. алматы'/'город алматы' с исключением области\n    const custName = String(lot.customerNameRu || '').toLowerCase();\n    const isCustomerAlmatyCity = RE_ALMATY_CITY.test(custName) && !RE_EXCLUDE_REGION.test(custName);\n\n    const isAlmaty = hasKato75 || isCustomerAlmatyCity;\n\n    if (!isAlmaty) {\n      skippedOtherRegions++;\n      continue;\n    }\n\n    allLots.push(lot);\n  }\n}\n\nconst apiFailure = errorCount > 0 && totalRaw === 0 && allItems.length > 0;\nif (apiFailure) {\n  console.error(`[MERGE CRITICAL] Все ${allItems.length} запросов к ЦЭФ вернули ошибки! Возможен сбой GOSZAKUP_TOKEN.`);\n}\n\nconsole.log(`[MERGE ALMATY SOLO] Всего лотов: ${totalRaw} | Отсеяно других регионов/области: ${skippedOtherRegions} | Алматы: ${allLots.length} | Ошибок API: ${errorCount}`);\n\nreturn [{\n  json: {\n    data: { Lots: allLots },\n    mergedCount: allLots.length,\n    totalRaw,\n    skippedOtherRegions,\n    errorCount,\n    apiFailure\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        112
+      ],
+      "id": "5f575424-4195-4978-a8b4-596cbce40074",
+      "name": "Merge & Deduplicate Lots",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "documentId": {
+          "__rl": true,
+          "value": "1yG8w71r5KB8Mmi7Nc7U100TzNUfwMltZ5Z2ig1VSR38",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "История лотов",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1136,
+        112
+      ],
+      "id": "5d484823-4567-469e-9073-89fd1ed34bf4",
+      "name": "Fetch Lot History",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "googleApi": {
+          "id": "aNCFRMVEJxT1dG3j",
+          "name": "Google Service Account account"
+        }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ЧТЕНИЕ МУЛЬТИКАТАЛОГА (AL-STYLE + ASBIS) И ПЕРЕДАЧА МЕТАДАННЫХ\n// Оптимизировано: возвращает 1 элемент статуса вместо 18 000 элементов, предотвращая разрастание SQLite БД\nconst fs = require('fs');\nconst multiCachePath = '/home/node/.n8n/multi_catalog_cache.json';\nconst multiBackupPath = '/home/node/.n8n/multi_catalog_cache.json.bak';\nconst alstyleCachePath = '/home/node/.n8n/alstyle_catalog_cache.json';\n\nlet targetPath = null;\nlet mtime = null;\n\nif (fs.existsSync(multiCachePath) && fs.statSync(multiCachePath).size > 100000) {\n  targetPath = multiCachePath;\n  mtime = fs.statSync(multiCachePath).mtimeMs;\n} else if (fs.existsSync(multiBackupPath) && fs.statSync(multiBackupPath).size > 100000) {\n  console.warn('[CACHE FALLBACK] Мультикаталог взят из резервной копии: ' + multiBackupPath);\n  targetPath = multiBackupPath;\n  mtime = fs.statSync(multiBackupPath).mtimeMs;\n} else if (fs.existsSync(alstyleCachePath) && fs.statSync(alstyleCachePath).size > 100000) {\n  console.warn('[CACHE FALLBACK] Используется каталог Al-Style: ' + alstyleCachePath);\n  targetPath = alstyleCachePath;\n  mtime = fs.statSync(alstyleCachePath).mtimeMs;\n}\n\nif (!targetPath) {\n  console.error('[CATALOG ERROR] Файл мультикаталога не найден ни по одному из путей!');\n  return [{\n    json: {\n      catalogLoadError: true,\n      catalogReady: false,\n      mtime: null,\n      error: 'Файл кэша мультикаталога не найден'\n    }\n  }];\n}\n\nconst t0 = Date.now();\nconst ageHours = mtime ? (Date.now() - mtime) / (1000 * 60 * 60) : 999;\nconst staleCatalog = ageHours > 48;\n\nlet count = 0;\ntry {\n  const stat = fs.statSync(targetPath);\n  // Быстрая проверка размера\n  if (stat.size < 100000) throw new Error('File too small');\n} catch (e) {\n  return [{ json: { catalogLoadError: true, catalogReady: false, error: e.message } }];\n}\n\nconsole.log(`[MULTI-CATALOG METADATA] Мультикаталог валидирован (${targetPath}, возраст: ${ageHours.toFixed(1)}ч, stale: ${staleCatalog}).`);\n\nreturn [{\n  json: {\n    catalogReady: true,\n    catalogLoadError: false,\n    staleCatalog,\n    catalogMtime: mtime,\n    catalogPath: targetPath\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        112
+      ],
+      "id": "89285d1d-71d5-4749-a4e4-dc261477c390",
+      "name": "Fetch Al-Style Catalog",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const geminiKey = (typeof $env !== 'undefined' && $env.GEMINI_API_KEY) || (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) || '';\n// ====================================================================\n// УЗЕЛ: 4-УРОВНЕВЫЙ ИНТЕЛЛЕКТУАЛЬНЫЙ КОНВЕЙЕР (V5.3.0 ANTI-STARVATION & HARD-LOCKS)\n// Реализация архитектурного плана:\n// 1. Структурный Hard-Lock: исключение isAcc/фурнитуры для первичных устройств (isPrimaryLot)\n// 2. Слияние с retrieval: lotTokens строятся из полного обогащенного текста (rawTitle)\n// 3. IDF/Relevance скоринг кандидатов\n// 4. Взаимное исключение категорий (RE_MONITOR vs RE_AIO vs RE_LAPTOP vs RE_DESKTOP)\n// 5. Позитивная контекстная проверка для «гарнитур» + стоп-слова не-ИТ\n// 6. Квотирование на уровне ЛОТОВ (Anti-Starvation: max 3 лота на категорию)\n// ====================================================================\n\n// Загрузка мультикаталога напрямую с диска (защита от разрастания SQLite n8n)\nconst fs = require('fs');\nconst catalogStatus = $input.first()?.json || {};\n\nlet catalogRows = [];\nconst targetPath = catalogStatus.catalogPath || '/home/node/.n8n/multi_catalog_cache.json';\nconst fallbackPath = '/home/node/.n8n/alstyle_catalog_cache.json';\n\ntry {\n  if (fs.existsSync(targetPath)) {\n    catalogRows = JSON.parse(fs.readFileSync(targetPath, 'utf8'));\n  } else if (fs.existsSync(fallbackPath)) {\n    catalogRows = JSON.parse(fs.readFileSync(fallbackPath, 'utf8'));\n  }\n} catch (e) {\n  console.error('[PRE-FILTER ERROR] Ошибка чтения каталога:', e.message);\n}\n\nif (!Array.isArray(catalogRows) || catalogRows.length === 0) {\n  console.error('[PRE-FILTER ERROR] Каталог не загружен (0 товаров)!');\n  return [{\n    json: {\n      empty: true,\n      catalogLoadError: true,\n      chatId: 681740470\n    }\n  }];\n}\nconst isCatalogStale = !!catalogStatus.staleCatalog;\n\nlet recentLots = [];\ntry {\n  const docResp = $('Document Extraction Layer').first()?.json;\n  if (docResp && Array.isArray(docResp.enrichedLots) && docResp.enrichedLots.length > 0) {\n    recentLots = docResp.enrichedLots;\n  } else {\n    const apiResp = $('Merge & Deduplicate Lots').first()?.json;\n    recentLots = apiResp?.data?.Lots || [];\n  }\n} catch (e) {\n  console.error('[GOSZAKUP EXCEPTION]', e.message);\n}\n\nlet historyRows = [];\ntry {\n  historyRows = $('Fetch Lot History').all().map(i => i.json).filter(Boolean);\n} catch (e) {}\n\nlet chatId = 681740470;\ntry {\n  chatId = $('Auth & Command Router').first()?.json?.chatId || 681740470;\n} catch (e) {}\n\n// --- ДЕДУПЛИКАЦИЯ ПО ИСТОРИИ ---\nconst sentLotIds = new Set();\nfor (const r of historyRows) {\n  for (const [k, v] of Object.entries(r)) {\n    const lk = k.toLowerCase();\n    if (lk.includes('номер') || lk.includes('лот') || lk.includes('id')) {\n      if (v) sentLotIds.add(String(v).trim());\n    }\n  }\n}\n\nfunction makeWordRegex(pattern) {\n  return new RegExp('(?<![a-zа-яё0-9])(' + pattern + ')(?![a-zа-яё0-9])', 'i');\n}\n\nconst VENDOR_LOCK_PATTERNS = [\n  { regex: makeWordRegex('fortilink'), name: 'Fortinet FortiLink (Проектный VAD вендор)' },\n  { regex: makeWordRegex('fortigate'), name: 'Fortinet FortiGate (Проектный VAD вендор)' },\n  { regex: makeWordRegex('cisco'), name: 'Cisco Systems (Проектный VAD вендор)' },\n  { regex: makeWordRegex('catalyst'), name: 'Cisco Catalyst (Проектный VAD вендор)' },\n  { regex: makeWordRegex('check[ \\t]*point'), name: 'Check Point (Проектный VAD вендор)' },\n  { regex: makeWordRegex('aruba'), name: 'Aruba Networks (Проектный вендор)' },\n  { regex: makeWordRegex('авторизационн[а-я]*[ \\t]*письм[а-я]*'), name: 'Требование авторизационного письма (MAF)' },\n  { regex: makeWordRegex('maf|маф'), name: 'MAF (Manufacturer Authorization Form)' },\n  { regex: makeWordRegex('партнерск[а-я]*[ \\t]*сертификат[а-я]*[ \\t]*вендор[а-я]*'), name: 'Партнерский сертификат вендора' },\n  { regex: makeWordRegex('письм[а-я]*[ \\t]*от[ \\t]*правообладател[а-я]*'), name: 'Письмо от правообладателя' },\n  { regex: makeWordRegex('официальн[а-я]*[ \\t]*дистрибьютор[а-я]*'), name: 'Требование статуса официального дистрибьютора' },\n  { regex: makeWordRegex('whatsapp|ватсап|ватцап'), name: 'Коррупционный маркер (согласование через WhatsApp)' },\n  { regex: makeWordRegex('предоставить[ \\t]*образец[ \\t]*до|согласовать[ \\t]*образец[ \\t]*до'), name: 'Заточка (предоставление образца до подписания)' },\n  { regex: makeWordRegex('фото[ \\t/]*видео[ \\t]*образц[а-я]*'), name: 'Заточка (фото/видео образца)' }\n];\n\nconst RE_NON_IT_LOT = /(?:мебель[а-я]*|спальн[а-я]*|кухонн[а-я]*|кроват[а-я]*|шкаф[а-я]*|диван[а-я]*|матрас[а-я]*|одежд[а-я]*|посуд[а-я]*|клеточн[а-я]*\\s*культур|зажим[а-я]*\\s*для\\s*бумаг|папка-планшет|планшет\\s*канцелярск|дезинфекционн[а-я]*|морозильн[а-я]*|холодильн[а-я]*|автомобильн[а-я]*|велосипедн[а-я]*|камера[ \\t]+хранения)/i;\nconst RE_FURNITURE = /(?:мебель[а-я]*|спальн[а-я]*|кухонн[а-я]*|кроват[а-я]*|шкаф[а-я]*|диван[а-я]*|матрас[а-я]*|комод[а-я]*|стол[а-я]*|тумбочк[а-я]*)/i;\nconst RE_HEADSET_POSITIVE = /(?:наушник|микрофон|аудио|bluetooth|блютуз|проводн|беспроводн|usb|jack|разъем|type-c|связи|гарнитур[а-я]*[ \\t]+для[ \\t]+(?:пк|компьютер|телефон|раци|call|колл|диспетчер))/i;\n\nconst RE_A3 = makeWordRegex('а3|a3');\nconst RE_MFP_MODEL_SERIES = makeWordRegex(\n  'мфу|3-в-1|3[ \\t]*в[ \\t]*1|all-in-one|многофункциональн[а-я]*|' +\n  'mfp|imagerunner|maxify|workcentre|altalink|' +\n  'i-sensys[ \\t]+mf[a-z0-9]*|' +\n  'laserjet[ \\t]+(?:pro[ \\t]+)?mfp|' +\n  'smart[ \\t]*tank[ \\t]*(?:5|6|7)[0-9]{2}|' +\n  'deskjet[ \\t]+ink[ \\t]+advantage|' +\n  'pantum[ \\t]+(?:[bm]|cm)[0-9]{4}[a-z0-9]*|' +\n  'ecosys[ \\t]+m[0-9]{4}[a-z0-9]*|taskalfa|' +\n  '(?:dcp|mfc)-[a-z0-9]+|' +\n  'b[23][0-3]5[a-z0-9]*|c415[a-z0-9]*|c71[0-9]{2}[a-z0-9]*|b71[0-9]{2}[a-z0-9]*'\n);\nconst RE_MFP_FEATURE = makeWordRegex('копир[а-я]*|сканирован[а-я]*|копировальн[а-я]*|сканер[а-я]*');\nconst RE_MFP_NEGATION = /(?:без|не[ \\t]+имеет|отсутству(?:ет|ют)|исключая)[ \\t]+(?:функци[ий][ \\t]+)?(?:копир[а-я]*|сканир[а-я]*|мфу)/i;\nconst RE_MFP = makeWordRegex('мфу|3-в-1|3[ \\t]*в[ \\t]*1|all-in-one|многофункциональн[а-я]*|mfp|imagerunner|maxify|workcentre|altalink|копир[а-я]*|сканирован[а-я]*|копировальн[а-я]*|сканер[а-я]*');\nconst RE_PRINTER = makeWordRegex('принтер[а-я]*');\nconst RE_3D_OR_POS = makeWordRegex('3d|3д|чеков|этикеток|филаментн[а-я]*|фотополимерн[а-я]*|термопринтер');\nconst RE_PARTS_PREFIX = /^(?:рюкзак|сумк|чехол|папк|портфель|подставк|картридж|тонер|драм|чернила|барабан|фотобарабан|термопл|вал|бушинг|шлейф|шарнир|ролик|сепаратор|накладк|девелопер|фьюзер|лоток|тумб|пьедестал|чип|ракел|лезви|термоблок|шестерн|ремкомплект|ремонтный[ \\t]*комплект|комплект[ \\t]*инициализации|кабел|патч-корд|фильтр|удлинитель|переходник|адаптер|гарнитур|наушник|бумаг|скрепк)[а-я]*/i;\nconst RE_COLOR = makeWordRegex('цветн[а-я]*|color|cmyk|полноцветн[а-я]*|түрлі[ \\t]*түсті');\nconst RE_MONO = makeWordRegex('монохромн[а-я]*|черно-бел[а-я]*|ч/б|ч-б|mono|ак-кара');\nconst RE_LAPTOP = makeWordRegex('ноутбук[а-я]*|лэптоп[а-я]*|laptop');\nconst RE_AIO = makeWordRegex('моноблок[а-я]*|all-in-one|aio');\nconst RE_DESKTOP = makeWordRegex('системный[ \\t]+блок|десктоп|неттоп|nettop|компьютер[ \\t]+в[ \\t]+сборе|пк[ \\t]+game|компьютер[ \\t]+персональный|офисный[ \\t]+компьютер');\nconst RE_SERVER = makeWordRegex('сервер[а-я]*|server|стоечный[ \\t]+сервер|rack[ \\t]+server');\nconst RE_POE = makeWordRegex('poe|poe\\\\+|802\\\\.3af|802\\\\.3at');\nconst RE_MANAGED = makeWordRegex('управляем[а-я]*|l2|l3|managed');\nconst RE_ROUTER = makeWordRegex('маршрутизатор[а-я]*|роутер[а-я]*|router');\nconst RE_SWITCH = makeWordRegex('коммутатор[а-я]*|свитч[а-я]*|switch');\nconst RE_UNMANAGED = makeWordRegex('неуправляем[а-я]*|unmanaged');\nconst RE_MONITOR = makeWordRegex('монитор[а-я]*');\nconst RE_PHONE = makeWordRegex('телефон[а-я]*|смартфон[а-я]*');\nconst RE_FLASH = makeWordRegex('флеш[а-я]*|flash|usb-флеш[а-я]*');\n\nconst RE_TABLET_PC = makeWordRegex('ipados|ipad|айпад|ios|android|андроид|windows[ \t]*1[01]|планшетный[ \t]*пк|планшетный[ \t]*компьютер|сенсорный[ \t]*экран|сенсорный[ \t]*дисплей|multi-touch|мультитач|a16|bionic|apple|snapdragon|dimensity|qualcomm|m1|m2|m3|m4|touch[ \t]*id|face[ \t]*id|фронтальн[а-я]*[ \t]*камер[а-я]*|основн[а-я]*[ \t]*камер[а-я]*|динамик[а-я]*|аккумулятор|li-pol|wi-fi[ \t]*6|дисплей[ \t]*не[ \t]*менее|встроенн[а-я]*[ \t]*памят[а-я]*');\nconst RE_DIGITIZER = makeWordRegex('дигитайзер|digitizer|перо[ \t]+без[ \t]+батареи|пассивн[а-я]*[ \t]+перо|стилус[ \t]+без[ \t]+батареи|уровн[а-я]*[ \t]+давления|lpi|8192|4096|huion|xp-pen|wacom|графическ[а-я]*[ \t]+планшет|планшет[ \t]+для[ \t]+рисован[а-я]*|интерактивн[а-я]*[ \t]+дисплей[ \t]+huion');\n\n// ХАРД-ЛОКИ НОВЫХ IT-КАТЕГОРИЙ (Task 7): ИБП, Проекторы, Видеонаблюдение/Камеры, Точки доступа\nconst RE_UPS = makeWordRegex('ибп|ups|источник[ \t]+бесперебойного[ \t]+питания|бесперебойник[а-я]*|on-line[ \t]+ибп|line-interactive');\nconst RE_PROJECTOR = makeWordRegex('проектор[а-я]*|мультимедийный[ \t]+проектор');\nconst RE_CAMERA = makeWordRegex('видеокамер[а-я]*|ip-камер[а-я]*|камера[ \t]+видеонаблюдения|веб-камер[а-я]*|web-камер[а-я]*|видеонаблюдени[а-я]*');\nconst RE_ACCESS_POINT = makeWordRegex('точка[ \t]+доступа|access[ \t]*point|ap[ \t]+wi-fi|беспроводная[ \t]+точка[ \t]+доступа');\n\nconst RE_ACCESSORY = makeWordRegex(\n  'картридж[а-я]*|тонер[а-я]*|драм[а-я]*|чернил[а-я]*|барабан[а-я]*|фотобарабан[а-я]*|термопл[а-я]*|' +\n  'термоэлемент[а-я]*|термистор[а-я]*|вал[а-я]*|бушинг[а-я]*|шлейф[а-я]*|шарнир[а-я]*|ролик[а-я]*|' +\n  'сепаратор[а-я]*|накладк[а-я]*|девелопер[а-я]*|фьюзер[а-я]*|лоток[а-я]*|тумб[а-я]*|пьедестал[а-я]*|' +\n  'чип[а-я]*|ракел[а-я]*|лезви[а-я]*|термоблок[а-я]*|шестерн[а-я]*|ремкомплект[а-я]*|ремонтный[ \\t]*комплект[а-я]*|' +\n  'комплект[ \\t]*инициализации|кабел[а-я]*|патч-корд[а-я]*|фильтр[а-я]*|удлинитель[а-я]*|переходник[а-я]*|' +\n  'адаптер[а-я]*|гарнитур[а-я]*|наушник[а-я]*|бумаг[а-я]*|мышь|клавиатур[а-я]*|коврик[а-я]*|скрепк[а-я]*|' +\n  'суппорт[а-я]*|соединител[а-я]*|кабель-канал[а-я]*|кронштейн[а-я]*|доводчик[а-я]*|заглушк[а-я]*|панел[а-я]*[ \\t]*монтажн[а-я]*'\n);\nconst RE_PRIMARY = makeWordRegex('ноутбук[а-я]*|принтер[а-я]*|мфу|компьютер[а-я]*|моноблок[а-я]*|сервер[а-я]*|коммутатор[а-я]*|маршрутизатор[а-я]*|роутер[а-я]*|монитор[а-я]*|смартфон[а-я]*|телефон[а-я]*');\n\nconst RE_LOG_SMALL = makeWordRegex('флеш[а-я]*|flash|usb|кабель[а-я]*|патч-корд[а-я]*|мышь|mouse|коврик[а-я]*|наушник[а-я]*|гарнитур[а-я]*|headset|адаптер[а-я]*|переходник[а-я]*|картридж[а-я]*|тонер[а-я]*|cartridge|toner');\nconst RE_LOG_HEAVY = makeWordRegex('сервер[а-я]*|стойк[а-я]*');\nconst RE_LOG_OFFICE = makeWordRegex('принтер[а-я]*|мфу|компьютер[а-я]*|системный[ \\t]*блок|моноблок[а-я]*|монитор[а-я]*|ибп');\n\nconst STOP_WORDS = new Set([\n  'штук', 'штука', 'штуки', 'шт', 'поставка', 'для', 'комплект', 'товар', 'товара', 'товаров',\n  'услуга', 'работа', 'техническая', 'спецификация', 'согласно', 'требования',\n  'паспорт', 'гарантия', 'качество', 'соответствие', 'новый', 'доставка', 'пункт',\n  'более', 'менее', 'но', 'не', 'до', 'от', 'по', 'на', 'из', 'со', 'ко', 'во',\n  'же', 'ли', 'бы', 'при', 'под', 'над', 'через', 'между', 'после', 'перед',\n  'около', 'возле', 'среди', 'один', 'два', 'три', 'также', 'все', 'всего',\n  'всех', 'только', 'любой', 'любая', 'любые', 'каждый', 'каждая', 'каждое',\n  'номер', 'тип', 'вид', 'класс', 'версия', 'модель', 'серия', 'цвет', 'размер',\n  'черный', 'белый', 'серый', 'стандарт', 'наличии', 'новые', 'оригинал', 'оригинальный',\n  'качественный', 'должен', 'должна', 'должно', 'быть', 'иметь', 'обеспечивать',\n  'предусмотрено', 'возможность',\n  'бытовой', 'бытовая', 'бытовое', 'бытовые', 'специализированный', 'специализированная', 'универсальный', 'универсальная'\n]);\n\nfunction tokenize(text) {\n  if (!text) return [];\n  const rawWords = text.toLowerCase()\n    .replace(/[\\(\\)\\[\\]\\{\\}\\.,;:!?\"'«»—–\\/\\\\]/g, ' ')\n    .split(/\\s+/)\n    .filter(w => w.length >= 2 && !STOP_WORDS.has(w));\n\n  const tokens = new Set();\n  for (const w of rawWords) {\n    if (w.includes('-') || w.includes('_')) {\n      const parts = w.split(/[-_]/).filter(p => p.length >= 2 && !/^\\d+$/.test(p) && !STOP_WORDS.has(p));\n      for (const p of parts) tokens.add(p);\n      const clean = w.replace(/[-_]/g, '');\n      if (clean.length >= 2 && !/^\\d+$/.test(clean) && !STOP_WORDS.has(clean)) tokens.add(clean);\n    }\n    if (!/^\\d+$/.test(w)) tokens.add(w);\n  }\n  return Array.from(tokens);\n}\n\nfunction calculateLogistics(productName, lotQty) {\n  const isSmall = RE_LOG_SMALL.test(productName);\n  let unitFee = 3000;\n  if (RE_LOG_HEAVY.test(productName)) {\n    unitFee = 15000;\n  } else if (RE_LOG_OFFICE.test(productName)) {\n    unitFee = 4500;\n  } else if (isSmall) {\n    unitFee = 500;\n  }\n  let baseCost = unitFee * lotQty;\n  if (isSmall) {\n    baseCost = Math.min(baseCost, 6000);\n  }\n  return Math.min(Math.max(baseCost, 3000), 150000);\n}\n\nfunction evaluateFinancials(lotBudget, purchaseCost, lotQty, productName) {\n  // Налоговый режим: СНР на основе упрощенной декларации (3% от общего оборота, ФНО 910.00)\n  // ТОО «Os.Corp Energy» не является плательщиком НДС (НДС = 0, КПН = 0)\n  const SNR_TAX_RATE = 0.03;\n\n  const targetBid = Math.round(lotBudget * 0.90);\n  const totalPurchase = Math.round(purchaseCost * lotQty);\n  const logisticsCost = calculateLogistics(productName, lotQty);\n\n  const snrTax = Math.round(targetBid * SNR_TAX_RATE);\n  const vatPayable = 0; // Без НДС\n  const citPayable = 0; // Без КПН 20%\n  const totalTax = snrTax; // Ровно 3% от суммы контракта\n\n  const totalExpenses = totalPurchase + logisticsCost + totalTax;\n  const netProfit = targetBid - totalExpenses;\n  const marginPercent = targetBid > 0 ? +((netProfit / targetBid) * 100).toFixed(1) : 0;\n\n  let isViable = false;\n  if (targetBid <= 100000) {\n    isViable = (netProfit >= 7000 && marginPercent >= 10);\n  } else if (targetBid <= 1000000) {\n    isViable = (netProfit >= 15000 && marginPercent >= 8);\n  } else {\n    isViable = (netProfit >= 40000 && marginPercent >= 6);\n  }\n\n  return {\n    targetBid,\n    totalPurchase,\n    logisticsCost,\n    vatPayable,\n    citPayable,\n    totalTax,\n    totalExpenses,\n    netProfit,\n    marginPercent,\n    isViable\n  };\n}\n\n// ====================================================================\n// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ СЖАТИЯ ТЗ И ИЗВЛЕЧЕНИЯ ТТХ\n// ====================================================================\nfunction extractSpecs(fullNameStr) {\n  if (!fullNameStr) return '';\n  const parts = String(fullNameStr).split(',').map(p => p.trim()).filter(Boolean);\n  if (parts.length <= 2) return String(fullNameStr).substring(0, 120);\n  const specParts = parts.slice(2);\n  const specsStr = specParts.slice(0, 7).join(' | ');\n  return specsStr.length > 150 ? specsStr.substring(0, 147) + '...' : specsStr;\n}\n\nfunction compressLotText(text) {\n  if (!text || text.length <= 400) return text || '';\n  const KZ_CHARS = /[\\u04D9\\u0493\\u049B\\u04A3\\u04E9\\u04B1\\u04AF\\u04BB\\u0456\\u04D8\\u0492\\u049A\\u04A2\\u04E8\\u04B0\\u04AE\\u04BA\\u0406]/;\n  const LEGAL_RE = /(?:поставщик обязан|оплата производится|гарантия|товар должен быть новым|срок поставки|место поставки|требования к упаковке|при наличии|в соответствии с|согласно|закон рк|банковских|календарных|дня подписания)/i;\n  const TECH_RE = /[0-9]+\\s*(?:гб|gb|мгц|mhz|ггц|ghz|вт|w|мс|ms|ppm|dpi|мп|mp)|(?:ips|tn|va|oled|ssd|hdd|ddr[0-9]*|fhd|uhd|4k|adf|dadf|rj-?[0-9]+|usb|wi-fi|bluetooth|hdmi|nvme|windows|core|ryzen|intel|amd|a3|а3|a4|а4|≥|≤|×|[0-9]+x[0-9]+|не менее|не более)/i;\n  \n  const lines = text.split('\\n');\n  const techLines = [];\n  for (const line of lines) {\n    const t = line.trim();\n    if (!t || t.length < 3) continue;\n    if (KZ_CHARS.test(t)) continue;\n    if (LEGAL_RE.test(t)) continue;\n    if (TECH_RE.test(t) || t.includes(':') || t.startsWith('•') || t.startsWith('-') || t.startsWith('*')) {\n      techLines.push('• ' + t.replace(/^[•\\-*\\s]+/, ''));\n    }\n  }\n  const compressed = techLines.join('\\n');\n  if (compressed.length >= 50) {\n    return compressed.length > 750 ? compressed.substring(0, 747) + '...' : compressed;\n  }\n  return text.substring(0, 450) + (text.length > 450 ? '...[сжато]' : '');\n}\n\n\n// 1. ИНВЕРТИРОВАННЫЙ ИНДЕКС КАТАЛОГА AL-STYLE\nconst products = [];\nconst tokenIndex = new Map();\nconst primaryIndices = [];\nconst accessoryIndices = [];\n\nfor (let idx = 0; idx < catalogRows.length; idx++) {\n  const row = catalogRows[idx];\n  let purchasePrice = 0, code = '', sku = '', name = '', fullName = '', stock = 0, distributor = row.distributor || 'Al-Style';\n\n  for (const [key, rawVal] of Object.entries(row)) {\n    const cleanKey = key.toLowerCase().trim();\n    const val = String(rawVal || '').trim();\n    if (!purchasePrice && (cleanKey.includes('дил') || cleanKey.includes('закуп') || cleanKey.includes('цена') || cleanKey.includes('cost'))) {\n      if (!cleanKey.includes('уцен')) {\n        const num = parseFloat(val.replace(/\\s+/g, '').replace(/,/g, '.').replace(/[^0-9.]/g, ''));\n        if (!isNaN(num) && num > 100) purchasePrice = num;\n      }\n    }\n    if (cleanKey.includes('код') || cleanKey === 'code') code = val;\n    if (cleanKey.includes('арт') || cleanKey === 'sku') sku = val;\n    if (cleanKey.includes('полное') || cleanKey.includes('full') || cleanKey.includes('описан')) fullName = val;\n    else if (cleanKey.includes('наимен') || cleanKey.includes('name')) name = val;\n    if (cleanKey.includes('остат') || cleanKey.includes('склад') || cleanKey.includes('stock')) {\n      const s = parseInt(val.replace(/[^0-9]/g, ''));\n      if (!isNaN(s)) stock = s;\n    }\n  }\n\n  if (purchasePrice > 100) {\n    const title = fullName || name;\n    if (title && title.length >= 3) {\n      const tokens = tokenize(title);\n      if (tokens.length > 0) {\n        const coreTitle = title.replace(/(?:для|for)[ \\t]+(?:принтер|копир|мфу|плоттер)[^,;]*/gi, '');\n        const is3DOrPos = RE_3D_OR_POS.test(title);\n        const startsWithPart = RE_PARTS_PREFIX.test(title);\n        const hasPrimaryDevice = RE_PRIMARY.test(coreTitle) || RE_MFP_MODEL_SERIES.test(coreTitle);\n        const isPart = RE_ACCESSORY.test(coreTitle);\n        const isInstallHardware = /(?:суппорт|соединител|кабель-канал|доводчик|заглушк|кронштейн|креплен|подставк|стойк|монтажн[а-я]*[ \\t]+панел)/i.test(title);\n        const isSmartWatch = /(?:смарт[ \\t]*часы|smart[ \\t]*watch|фитнес[ \\t]*браслет)/i.test(title);\n        const isIntercom = /(?:домофон|видеодомофон)/i.test(title);\n        const isHomeAppliance = /(?:весы|чайник|утюг|пылесос|фен|блендер|миксер|тостер|кран|водонагревател)/i.test(title);\n\n        const isAcc = is3DOrPos || startsWithPart || isInstallHardware || isHomeAppliance || (isPart && !hasPrimaryDevice);\n        const isMFP = !isAcc && (RE_MFP_MODEL_SERIES.test(coreTitle) || RE_MFP_FEATURE.test(coreTitle));\n        const isPrinterOnly = !isAcc && !isMFP && (\n          RE_PRINTER.test(coreTitle) || /canon[ \\t]+i-sensys[ \\t]+lbp|pantum[ \\t]+p[0-9]{4}|xerox[ \\t]+b[12][13]0/i.test(coreTitle)\n        );\n        const isMonitor = !isAcc && RE_MONITOR.test(coreTitle) && !RE_AIO.test(title) && !RE_LAPTOP.test(title) && !isInstallHardware && !isSmartWatch && !isIntercom;\n        const isDesktop = !isAcc && (\n          RE_DESKTOP.test(coreTitle) || /пк[ \\t]+game|компьютер[ \\t]+в[ \\t]+сборе/i.test(coreTitle)\n        ) && !RE_LAPTOP.test(title) && !RE_AIO.test(title);\n        const isPhone = !isAcc && /(?:смартфон|телефон[ \\t]+сотовый|телефон[ \\t]+мобильный|мобильный[ \\t]+телефон)/i.test(title);\n        const isFlashDrive = !isAcc && /(?:флеш-диск|флеш[ \\t]*накопитель|flash[ \\t]*drive|usb[ \\t]*flash)/i.test(title);\n\n        const pIndex = products.length;\n\n        const prodObj = {\n          distributor,\n          code: code || sku || '—',\n          name: title,\n          fullName: fullName,\n          price: purchasePrice,\n          stock,\n          isAcc,\n          tokenSet: new Set(tokens),\n          tokenCount: tokens.length,\n          hasA3: RE_A3.test(title),\n          isMFP: !!isMFP,\n          isPrinterOnly: !!isPrinterOnly,\n          isMonitor: !!isMonitor,\n          isDesktop: !!isDesktop,\n          isPhone: !!isPhone,\n          isFlashDrive: !!isFlashDrive,\n          isColor: RE_COLOR.test(title),\n          isMono: RE_MONO.test(title),\n          isLaptop: !isAcc && RE_LAPTOP.test(title) && !/(?:рюкзак|сумк|чехол|папк|портфель)/i.test(title),\n          isAIO: RE_AIO.test(title),\n          isServer: RE_SERVER.test(title),\n          hasPoE: RE_POE.test(title),\n          isUnmanaged: RE_UNMANAGED.test(title),\n          isRouter: RE_ROUTER.test(title) && !RE_SWITCH.test(title),\n          isSwitch: RE_SWITCH.test(title) && !RE_ROUTER.test(title),\n          isDigitizer: /huion|xp-pen|wacom|дигитайзер|перо\\s+без\\s+батареи|уровн[а-я]*\\s+давления|графический\\s+планшет/i.test(title),\n          isTabletPC: /ipad|galaxy\\s*tab|lenovo\\s*tab|mediapad|планшетный\\s*компьютер/i.test(title)\n        };\n\n        prodObj.isPrimaryProd = prodObj.isMFP || prodObj.isPrinterOnly || prodObj.isLaptop || prodObj.isAIO || prodObj.isDesktop || prodObj.isMonitor || prodObj.isTabletPC || prodObj.isServer || prodObj.isSwitch || prodObj.isRouter || prodObj.isPhone || prodObj.isFlashDrive;\n\n        products.push(prodObj);\n\n        if (isAcc) accessoryIndices.push(pIndex);\n        else primaryIndices.push(pIndex);\n\n        for (const tok of new Set(tokens)) {\n          let arr = tokenIndex.get(tok);\n          if (!arr) {\n            arr = [];\n            tokenIndex.set(tok, arr);\n          }\n          arr.push(pIndex);\n        }\n      }\n    }\n  }\n}\n\nconst totalCatalogDocs = products.length;\nconst docFreq = new Map();\nfor (const [tok, pIndices] of tokenIndex.entries()) {\n  docFreq.set(tok, pIndices.length);\n}\n\nfunction getIDF(tok) {\n  const df = docFreq.get(tok) || 0;\n  return Math.log(1 + (totalCatalogDocs / (df + 1)));\n}\n\nconsole.log(`[PRE-FILTER V5.3-ROBUST] Индексировано: ${products.length} товаров (первичных: ${primaryIndices.length}, аксессуаров: ${accessoryIndices.length}), ${tokenIndex.size} уникальных токенов.`);\n\n// 2. ФИЛЬТРАЦИЯ ЛОТОВ ГОСЗАКУПОК\nconst output = [];\n\nfor (const lot of recentLots) {\n  const lotDisplayNum = String(lot.lotNumber || lot.trdBuyNumberAnno || lot.id || '');\n  if (!lotDisplayNum || sentLotIds.has(lotDisplayNum)) continue;\n\n  const lotBudget = parseFloat(lot.amount) || 0;\n  const lotQty = parseInt(lot.count) || 1;\n  const lotBudgetPerUnit = lotQty > 0 ? (lotBudget / lotQty) : lotBudget;\n  const lotNameOnly = lot.nameRu || '';\n  const lotDescOnly = lot.descriptionRu || '';\n  const lotEnriched = (lot.enrichedDesc || '').trim();\n  const fullLotText = (lotEnriched || (lotNameOnly + ' ' + lotDescOnly)).trim();\n  const rawTitle = lotNameOnly + ' ' + lotDescOnly + (lotEnriched ? ' ' + lotEnriched : '');\n  const MAX_BUDGET_LIMIT = 10000000;\n  if (lotBudget < 30000 || lotBudget > MAX_BUDGET_LIMIT || !rawTitle.trim()) continue;\n\n  // ХАРД-ЛОК: Отсечение заведомо не-ИТ закупок\n  if (RE_NON_IT_LOT.test(lotNameOnly) || RE_NON_IT_LOT.test(fullLotText)) {\n    continue;\n  }\n\n  // ПОЗИТИВНАЯ ПРОВЕРКА ДЛЯ СЛОВА \"ГАРНИТУР\":\n  if (/гарнитур[а-я]*/i.test(lotNameOnly) || /гарнитур[а-я]*/i.test(fullLotText)) {\n    const hasFurniture = RE_FURNITURE.test(lotNameOnly) || RE_FURNITURE.test(fullLotText);\n    const hasPositiveHeadset = RE_HEADSET_POSITIVE.test(lotNameOnly) || RE_HEADSET_POSITIVE.test(fullLotText);\n    if (hasFurniture || !hasPositiveHeadset) {\n      continue;\n    }\n  }\n\n  const directUrl = 'https://goszakup.gov.kz/ru/search/lots?filter%5Bcustomer%5D=&filter%5Bnumber%5D=' + encodeURIComponent(lot.lotNumber || lotDisplayNum);\n\n  // ФИЛЬТР 1: ВЕНДОР-ЛОКИ\n  let isLocked = false;\n  for (const vl of VENDOR_LOCK_PATTERNS) {\n    if (vl.regex.test(rawTitle)) {\n      output.push({\n        json: {\n          chatId,\n          categoryTag: 'locked',\n          isVendorLocked: true,\n          lotId: String(lotDisplayNum),\n          lotName: lotNameOnly,\n          lotDesc: lot.enrichedDesc || lot.descriptionRu || '',\n          lotQty,\n          lotBudget,\n          directUrl,\n          lockReason: vl.name,\n          profit: 0\n        }\n      });\n      isLocked = true;\n      break;\n    }\n  }\n  if (isLocked) continue;\n\n  // ШАГ 2: СЛИЯНИЕ С RETRIEVAL - токены лота строятся из полного обогащенного текста (rawTitle)\n  const lotTokens = tokenize(rawTitle);\n  if (lotTokens.length === 0) continue;\n  const lotNameTokens = new Set(tokenize(lotNameOnly));\n\n  const isCartridgeOnlyLot = makeWordRegex('картридж[а-я]*|тонер[а-я]*|драм[а-я]*|чернил[а-я]*|фотобарабан[а-я]*|туба|термопленк[а-я]*').test(lotNameOnly);\n\n  const lotHasA3 = RE_A3.test(rawTitle);\n  const lotHasMfpNegation = RE_MFP_NEGATION.test(rawTitle);\n  let lotIsMFP = false;\n  if (isCartridgeOnlyLot) {\n    lotIsMFP = false;\n  } else if (lotHasMfpNegation && !makeWordRegex('мфу|3-в-1|3[ \\t]*в[ \\t]*1|all-in-one|многофункциональн[а-я]*|imagerunner|mfp').test(rawTitle)) {\n    lotIsMFP = false;\n  } else {\n    lotIsMFP = RE_MFP_MODEL_SERIES.test(rawTitle) || RE_MFP_FEATURE.test(rawTitle);\n  }\n\n  const lotIsPrinterOnly = !isCartridgeOnlyLot && RE_PRINTER.test(rawTitle) && !lotIsMFP;\n  const lotIsColor = RE_COLOR.test(rawTitle);\n  const lotIsMono = RE_MONO.test(rawTitle) && !lotIsColor;\n  const lotIsLaptop = RE_LAPTOP.test(rawTitle);\n  const lotIsAIO = RE_AIO.test(rawTitle);\n  const lotIsDesktop = (\n    RE_DESKTOP.test(rawTitle) ||\n    (makeWordRegex('компьютер[а-я]*').test(lotNameOnly) && !lotIsLaptop && !lotIsAIO && !RE_TABLET_PC.test(rawTitle))\n  ) && !lotIsLaptop && !lotIsAIO;\n  const lotIsServer = RE_SERVER.test(rawTitle);\n  const lotRequiresPoE = RE_POE.test(rawTitle);\n  const lotRequiresManaged = RE_MANAGED.test(rawTitle);\n  const lotIsRouter = RE_ROUTER.test(rawTitle) && !RE_SWITCH.test(rawTitle);\n  const lotIsSwitch = RE_SWITCH.test(rawTitle) && !RE_ROUTER.test(rawTitle);\n  const lotIsMonitor = RE_MONITOR.test(rawTitle) && !lotIsAIO && !lotIsLaptop;\n  const lotIsPhone = (makeWordRegex('телефон[а-я]*|смартфон[а-я]*').test(lotNameOnly) || /(?:сотовый|мобильный)\\s*телефон|смартфон/i.test(rawTitle)) && !/для\\s*(?:зарядки|подключения|питания)\\s*(?:телефонов|смартфонов)/i.test(rawTitle);\n  const lotIsFlash = RE_FLASH.test(rawTitle);\n\n  const lotIsTabletPC = RE_TABLET_PC.test(rawTitle) || (makeWordRegex('планшет[а-я]*').test(lotNameOnly) && !RE_DIGITIZER.test(rawTitle) && lotBudgetPerUnit >= 60000);\n  const lotIsDigitizerOnly = RE_DIGITIZER.test(rawTitle) && !RE_TABLET_PC.test(rawTitle);\n\n  // Классификация лота по новым IT-категориям:\n  const lotIsUPS = RE_UPS.test(rawTitle) && !makeWordRegex('аккумулятор[а-я]*|батаре[яеи][а-я]*|замена[ \\t]+батаре[ий]').test(rawTitle);\n  const lotIsProjector = RE_PROJECTOR.test(rawTitle) && !makeWordRegex('экран[а-я]*|полотно|кронштейн[а-я]*|лампа[ \\t]+для[ \\t]+проектора').test(rawTitle);\n  const lotIsCamera = RE_CAMERA.test(rawTitle) && !makeWordRegex('монтаж|установка|обслуживание|кронштейн[а-я]*|коробк[а-я]*').test(rawTitle);\n  const lotIsAccessPoint = RE_ACCESS_POINT.test(rawTitle) && !makeWordRegex('монтаж|настройка').test(rawTitle);\n\n  const hasPrinterOrMFP = (lotIsMFP || lotIsPrinterOnly) && !isCartridgeOnlyLot;\n  const hasCartridge = RE_ACCESSORY.test(rawTitle) && makeWordRegex('картридж[а-я]*|тонер[а-я]*').test(rawTitle);\n  const isPrinterBundle = hasPrinterOrMFP && hasCartridge && !isCartridgeOnlyLot;\n\n  const hasPC = lotIsDesktop || lotIsAIO;\n  const hasKBMOrMon = makeWordRegex('монитор[а-я]*|клавиатур[а-я]*|мышь').test(rawTitle);\n  const isPCBundle = hasPC && hasKBMOrMon;\n  const isBundle = isPrinterBundle || isPCBundle;\n\n  const isPrimaryLot = lotIsMFP || lotIsPrinterOnly || lotIsLaptop || lotIsAIO || lotIsDesktop || lotIsMonitor || lotIsTabletPC || lotIsServer || lotIsSwitch || lotIsRouter || lotIsPhone || lotIsFlash || lotIsUPS || lotIsProjector || lotIsCamera || lotIsAccessPoint;\n\n  let categoryTag = 'other';\n  if (lotIsMonitor) categoryTag = 'monitor';\n  else if (hasPrinterOrMFP) categoryTag = 'printer_mfp';\n  else if (lotIsDesktop || lotIsLaptop || lotIsAIO) categoryTag = 'computer';\n  else if (lotIsTabletPC || lotIsDigitizerOnly) categoryTag = 'tablet';\n  else if (lotIsRouter || lotIsSwitch) categoryTag = 'network';\n  else if (lotIsPhone) categoryTag = 'phone';\n  else if (lotIsFlash) categoryTag = 'flash';\n  else if (lotIsUPS) categoryTag = 'ups';\n  else if (lotIsProjector) categoryTag = 'projector';\n  else if (lotIsCamera) categoryTag = 'camera';\n  else if (lotIsAccessPoint) categoryTag = 'network';\n  else if (isCartridgeOnlyLot || RE_ACCESSORY.test(rawTitle)) categoryTag = 'cartridge_part';\n\n  const candidateHits = new Map();\n  const candidateScores = new Map();\n  for (const tok of new Set(lotTokens)) {\n    const pIndices = tokenIndex.get(tok);\n    if (pIndices) {\n      const idf = getIDF(tok);\n      for (let i = 0; i < pIndices.length; i++) {\n        const pIdx = pIndices[i];\n        candidateHits.set(pIdx, (candidateHits.get(pIdx) || 0) + 1);\n        candidateScores.set(pIdx, (candidateScores.get(pIdx) || 0) + idf);\n      }\n    }\n  }\n\n  // Также добавляем совпадения по точной категории для мониторов (direct category hit)\n  if (lotIsMonitor) {\n    const monIndices = tokenIndex.get('монитор') || [];\n    for (const pIdx of monIndices) {\n      if (!candidateHits.has(pIdx)) {\n        candidateHits.set(pIdx, 1);\n        candidateScores.set(pIdx, getIDF('монитор'));\n      }\n    }\n  }\n\n  if (candidateHits.size === 0) continue;\n\n  if (isBundle) {\n    const primaryScored = [];\n    const accessoryScored = [];\n\n    for (const [pIdx, hits] of candidateHits.entries()) {\n      const idfScore = candidateScores.get(pIdx) || 0;\n      const prod = products[pIdx];\n      // stock check removed for Solo mode\n\n      if (!prod.isAcc) {\n        if (lotHasA3 && (!prod.hasA3 || prod.price < 250000)) continue;\n        if (lotIsMFP && prod.isPrinterOnly) continue;\n        if (lotIsPrinterOnly && prod.isMFP) continue;\n        if (lotIsColor && prod.isMono) continue;\n        if (lotIsMono && prod.isColor) continue;\n        if (lotIsLaptop && !prod.isLaptop) continue;\n        if (lotIsAIO && !prod.isAIO) continue;\n        if (lotIsDesktop && !prod.isDesktop) continue;\n        if (lotIsMonitor && !prod.isMonitor) continue;\n        if (!lotIsMonitor && prod.isMonitor) continue;\n        if (lotIsRouter && prod.isSwitch) continue;\n        if (lotIsSwitch && prod.isRouter) continue;\n        if (lotIsTabletPC && prod.isDigitizer) continue;\n        if (lotIsDigitizerOnly && prod.isTabletPC) continue;\n\n        if (hits >= 2 || idfScore >= 6.0) {\n          primaryScored.push({\n            code: prod.code,\n            name: prod.name,\n            fullName: prod.fullName || prod.name,\n            price: prod.price,\n            hits,\n            score: ((() => {\n              let s = (idfScore * 20) + (hits * 50);\n              const uBudg = lotBudget / lotQty;\n              if (uBudg > 0 && prod.price > 0) {\n                const r = prod.price / uBudg;\n                if (r >= 0.30 && r <= 0.85) s += 150;\n                else if (r >= 0.15 && r < 0.30) s += 80;\n                else if (r < 0.08 && uBudg >= 30000) s -= 120;\n              }\n              return s;\n            })())\n          });\n        }\n      } else {\n        if (hits >= 1 || idfScore >= 4.0) {\n          accessoryScored.push({\n            code: prod.code,\n            name: prod.name,\n            fullName: prod.fullName || prod.name,\n            price: prod.price,\n            hits,\n            score: (idfScore * 20) + (hits * 50)\n          });\n        }\n      }\n    }\n\n    if (primaryScored.length === 0) continue;\n    primaryScored.sort((a, b) => b.score - a.score);\n    accessoryScored.sort((a, b) => b.score - a.score);\n\n    const topPrimary = primaryScored.slice(0, 3);\n    const topPrimaryForAi = topPrimary.map(p => ({\n      code: p.code,\n      name: p.name,\n      specs: extractSpecs(p.fullName || p.name),\n      price: p.price,\n      score: +p.score.toFixed(1)\n    }));\n    const topAccessory = accessoryScored.slice(0, 3);\n    const topAccessoryForAi = topAccessory.map(a => ({\n      code: a.code,\n      name: a.name,\n      specs: extractSpecs(a.fullName || a.name),\n      price: a.price,\n      score: +a.score.toFixed(1)\n    }));\n    const primaryCost = topPrimary[0].price;\n    const accessoryCost = topAccessory.length > 0 ? topAccessory[0].price : 0;\n    const baseFin = evaluateFinancials(lotBudget, primaryCost + accessoryCost, lotQty, topPrimary[0].name);\n    if (!baseFin.isViable) continue;\n\n    const geminiPrompt =\n      \"Ты — старший юрист по госзакупкам РК и технический эксперт в ТОО «Os.corp Energy». Проведи аудит применимости КОМПЛЕКТА оборудования к лоту.\\n\\n\" +\n      \"ДАННЫЕ ЛОТА:\\n\" +\n      \"- ID лота: \" + lotDisplayNum + \"\\n\" +\n      \"- Наименование лота: \" + lotNameOnly + \"\\n\" +\n      \"- Бюджет: \" + lotBudget + \" KZT, Количество: \" + lotQty + \" шт.\\n\" +\n      \"- Техническая спецификация лота (сжато): \" + compressLotText(fullLotText) + \"\\n\\n\" +\n      \"КАНДИДАТЫ СО СКЛАДА (ОСНОВНОЕ ОБОРУДОВАНИЕ):\\n\" +\n      JSON.stringify(topPrimaryForAi, null, 2) + \"\\n\\n\" +\n      \"КАНДИДАТЫ СО СКЛАДА (ДОПОЛНИТЕЛЬНЫЕ РАСХОДНИКИ / КОМПЛЕКТУЮЩИЕ):\\n\" +\n      JSON.stringify(topAccessoryForAi, null, 2) + \"\\n\\n\" +\n      \"ПРАВИЛА АУДИТА:\\n\" +\n      \"1. ПРОВЕРКА КОМПЛЕКТАЦИИ. Если ТЗ требует поставку основного устройства и расходников — кандидат обязан содержать обе позиции.\\n\" +\n      \"2. ЗАПРЕТ ПОДМЕНЫ ФУНКЦИОНАЛЬНОГО КЛАССА. Нельзя заменять МФУ на принтер или наоборот.\\n\" +\n      \"3. ФОРМАТ verdict. Дай короткое (1–3 предложения) юридически обоснованное объяснение решения со ссылкой на пункт ТЗ.\\n\\n\" +\n      \"Ответь строго по JSON-схеме, без пояснений вне JSON.\";\n\n    output.push({\n      json: {\n        categoryTag,\n        chatId,\n        geminiKey,\n        tradeMethodId: lot.refTradeMethodsId || 3,\n        isBundle: true,\n        isVendorLocked: false,\n        isManualReviewRequired: !!lot.isManualReviewRequired,\n        lotId: String(lotDisplayNum),\n        lotName: lotNameOnly,\n        lotDesc: fullLotText,\n        lotQty,\n        lotBudget,\n        directUrl,\n        primaryCandidates: topPrimary,\n        accessoryCandidates: topAccessory,\n        profit: baseFin.netProfit,\n        marginPercent: baseFin.marginPercent,\n        targetBid: baseFin.targetBid,\n        totalTax: baseFin.totalTax,\n        vatPayable: baseFin.vatPayable,\n        citPayable: baseFin.citPayable,\n        logisticsCost: baseFin.logisticsCost,\n        geminiPrompt\n      }\n    });\n\n  } else {\n    const scored = [];\n\n    for (const [pIdx, hits] of candidateHits.entries()) {\n      const idfScore = candidateScores.get(pIdx) || 0;\n      const prod = products[pIdx];\n      // stock check removed for Solo mode\n\n      // ШАГ 1: СТРУКТУРНЫЙ ХАРД-ЛОК - взаимное исключение первичных устройств и аксессуаров\n      if (isPrimaryLot && (prod.isAcc || !prod.isPrimaryProd)) continue;\n      if (!isPrimaryLot && prod.isPrimaryProd) continue;\n\n      // Точные категорийные Hard-Locks\n      if (lotIsMonitor && !prod.isMonitor) continue;\n      if (!lotIsMonitor && prod.isMonitor) continue;\n\n      if (lotIsDesktop && !prod.isDesktop) continue;\n      if (!lotIsDesktop && prod.isDesktop) continue;\n\n      if (lotIsLaptop && !prod.isLaptop) continue;\n      if (!lotIsLaptop && prod.isLaptop) continue;\n\n      if (lotIsAIO && !prod.isAIO) continue;\n      if (!lotIsAIO && prod.isAIO) continue;\n\n      if (lotIsServer && !prod.isServer) continue;\n      if (!lotIsServer && prod.isServer) continue;\n\n      if (lotIsRouter && prod.isSwitch) continue;\n      if (lotIsSwitch && prod.isRouter) continue;\n\n      if (lotIsPhone && !prod.isPhone) continue;\n      if (!lotIsPhone && prod.isPhone) continue;\n\n      if (lotIsFlash && !prod.isFlashDrive) continue;\n      if (!lotIsFlash && prod.isFlashDrive) continue;\n\n      if (lotIsTabletPC && prod.isDigitizer) continue;\n      if (lotIsDigitizerOnly && prod.isTabletPC) continue;\n\n      // Хард-локи новых категорий:\n      if (lotIsUPS && !prod.isUPS) continue;\n      if (!lotIsUPS && prod.isUPS) continue;\n\n      if (lotIsProjector && !prod.isProjector) continue;\n      if (!lotIsProjector && prod.isProjector) continue;\n\n      if (lotIsCamera && !prod.isCamera) continue;\n      if (!lotIsCamera && prod.isCamera) continue;\n\n      if (lotIsAccessPoint && !prod.isAccessPoint) continue;\n      if (!lotIsAccessPoint && prod.isAccessPoint) continue;\n\n      if (lotHasA3 && (!prod.hasA3 || prod.price < 250000)) continue;\n      if (lotIsMFP && prod.isPrinterOnly) continue;\n      if (lotIsPrinterOnly && prod.isMFP) continue;\n      if (lotIsColor && prod.isMono) continue;\n      if (lotIsMono && prod.isColor) continue;\n      if (!hasPrinterOrMFP && (prod.isMFP || prod.isPrinterOnly)) continue;\n      if (makeWordRegex('планшет[а-я]*').test(lotNameOnly) && lotBudgetPerUnit >= 60000 && prod.isDigitizer && prod.price < 35000) continue;\n\n      const isCategoryDirectMatch = \n        (lotIsMonitor && prod.isMonitor) ||\n        (lotIsMFP && prod.isMFP) ||\n        (lotIsPrinterOnly && prod.isPrinterOnly) ||\n        (lotIsLaptop && prod.isLaptop) ||\n        (lotIsAIO && prod.isAIO) ||\n        (lotIsDesktop && prod.isDesktop) ||\n        (lotIsServer && prod.isServer) ||\n        (lotIsRouter && prod.isRouter) ||\n        (lotIsSwitch && prod.isSwitch) ||\n        (lotIsTabletPC && prod.isTabletPC) ||\n        (lotIsDigitizerOnly && prod.isDigitizer) ||\n        (lotIsPhone && prod.isPhone) ||\n        (lotIsFlash && prod.isFlashDrive) ||\n        (lotIsUPS && prod.isUPS) ||\n        (lotIsProjector && prod.isProjector) ||\n        (lotIsCamera && prod.isCamera) ||\n        (lotIsAccessPoint && prod.isAccessPoint) ||\n        (categoryTag === 'cartridge_part' && prod.isAcc);\n\n      if (hits < 2 && idfScore < 6.0 && !isCategoryDirectMatch) continue;\n\n      let titleHits = 0;\n      for (const t of prod.tokenSet) {\n        if (lotNameTokens.has(t)) titleHits++;\n      }\n\n      // Детерминированная проверка ТТХ до финансовых расчетов\n      if (typeof checkDeterministicCompliance === 'function') {\n        const detCheck = checkDeterministicCompliance(fullLotText, prod.name);\n        if (!detCheck.pass) continue;\n      }\n\n      const fin = evaluateFinancials(lotBudget, prod.price, lotQty, prod.name);\n      if (!fin.isViable) continue;\n\n      let score = (idfScore * 20) + (hits * 50) + (titleHits * 100);\n\n      // Бюджетный коридор релевантности (Budget Tier Matching)\n      const unitBudget = lotBudget / lotQty;\n      if (unitBudget > 0 && prod.price > 0) {\n        const priceRatio = prod.price / unitBudget;\n        if (priceRatio >= 0.30 && priceRatio <= 0.85) {\n          score += 180; // Идеальный класс оборудования под бюджет заказчика\n        } else if (priceRatio >= 0.15 && priceRatio < 0.30) {\n          score += 90;  // Надежный средний класс\n        } else if (priceRatio < 0.08 && unitBudget >= 30000) {\n          score -= 150; // Бытовая «мыльница» на крупный корпоративный тендер\n        }\n      }\n\n      scored.push({\n        distributor: prod.distributor || 'Al-Style',\n        code: prod.code,\n        name: prod.name,\n        fullName: prod.fullName || prod.name,\n        price: prod.price,\n        stock: prod.stock,\n        is_mfp: !!prod.isMFP,\n        is_poe: !!prod.hasPoE,\n        is_a3: !!prod.hasA3,\n        is_color: !!prod.isColor,\n        is_router: !!prod.isRouter,\n        is_switch: !!prod.isSwitch,\n        is_digitizer: !!prod.isDigitizer,\n        is_tablet_pc: !!prod.isTabletPC,\n        is_monitor: !!prod.isMonitor,\n        fin,\n        score\n      });\n    }\n\n    if (scored.length === 0) continue;\n    scored.sort((a, b) => b.score !== a.score ? (b.score - a.score) : (b.price - a.price));\n\n    const topCandidates = scored.slice(0, 5);\n    const candidatePayload = topCandidates.map(c => ({\n      distributor: c.distributor || 'Al-Style',\n      code: c.code,\n      name: c.name,\n      specs: extractSpecs(c.fullName || c.name),\n      price: c.price,\n      score: +c.score.toFixed(1)\n    }));\n\n    const bestFin = topCandidates[0].fin;\n    const compressedLotSpec = compressLotText(fullLotText);\n\n    const geminiPrompt =\n      \"Ты — старший юрист по госзакупкам РК и технический эксперт в ТОО «Os.corp Energy». Твоя задача — провести строгий технико-юридический аудит соответствия кандидатов со склада технической спецификации лота.\\n\\n\" +\n      \"ДАННЫЕ ЛОТА:\\n\" +\n      \"- ID лота: \" + lotDisplayNum + \"\\n\" +\n      \"- Наименование лота: \" + lotNameOnly + \"\\n\" +\n      \"- Бюджет: \" + lotBudget + \" KZT, Количество: \" + lotQty + \" шт.\\n\" +\n      \"- Техническая спецификация лота (сжато): \" + compressedLotSpec + \"\\n\\n\" +\n      \"КАНДИДАТЫ СО СКЛАДА:\\n\" +\n      JSON.stringify(candidatePayload, null, 2) + \"\\n\\n\" +\n      \"ПРАВИЛА АУДИТА:\\n\" +\n      \"1. ЗАПРЕТ ПОДМЕНЫ ФУНКЦИОНАЛЬНОГО КЛАССА. МФУ (3-в-1: печать, сканирование, копирование) КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО заменять на однофункциональный принтер (только печать), и наоборот. Нельзя заменять монитор на кронштейн или мышь. Нельзя заменять ПК на кабельную фурнитуру.\\n\\n\" +\n      \"2. ФОРМАТ И ХАРАКТЕРИСТИКИ ПЕЧАТИ. Если лот требует формат А3 — принтер А4 недопустим. Если цветную печать — монохромный недопустим. Для картриджей и тонеров: строго проверять модель (CF259A, 59A и др.), ресурс и обязательное наличие чипа (если ТЗ требует чип, картриджи «Без чипа» КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ).\\n\\n\" +\n      \"3. ЗАПРЕТ ПОДМЕНЫ ПЛАНШЕТНОГО ПК ГРАФИЧЕСКИМ ПЕРОМ. Если в ТЗ лота требуется автономный планшетный компьютер с ОС — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО сопоставлять с графическими дигитайзерами без ОС.\\n\\n\" +\n      \"4. ПРОЕКТНЫЕ VAD-БРЕНДЫ. Если ТЗ требует Fortinet, Cisco, CheckPoint либо MAF — ставь isCompatible: false, matchBadge: \\\"🔴 ТРЕБУЕТСЯ VAD\\\", rnuRisk: \\\"ВЫСОКИЙ РИСК РНУ\\\".\\n\\n\" +\n      \"5. КОРРУПЦИОННЫЙ ЗАХВАТ («АНТИ-ЗАТОЧКА»). Маркеры заточки под конкретного поставщика — ставь rnuRisk: \\\"ВЫСОКИЙ РИСК РНУ: КОРРУПЦИОННАЯ ЗАТОЧКА\\\", isCompatible: false:\\n\" +\n      \"   - требование согласования по личному WhatsApp;\\n\" +\n      \"   - указание конкретной модели/бренда без обязательной формулировки «или эквивалент»;\\n\" +\n      \"   - расхождение наименования лота и содержания ТЗ.\\n\\n\" +\n      \"6. СОГЛАСОВАННОСТЬ ОТВЕТА. Если isCompatible: false — selectedCode обязан быть null.\\n\\n\" +\n      \"7. ФОРМАТ verdict. Дай короткое (1–3 предложения) юридически обоснованное объяснение решения со ссылкой на пункт ТЗ.\\n\\n\" +\n      \"Ответь строго по JSON-схеме, без пояснений вне JSON.\";\n\n    output.push({\n      json: {\n        categoryTag,\n        chatId,\n        geminiKey,\n        isBundle: false,\n        isVendorLocked: false,\n        isManualReviewRequired: !!lot.isManualReviewRequired,\n        staleCatalog: isCatalogStale,\n        tradeMethodId: Number(lot.refTradeMethodsId || lot.tradeMethodId || 3),\n        lotId: String(lotDisplayNum),\n        lotName: lotNameOnly,\n        lotDesc: fullLotText,\n        lotQty,\n        lotBudget,\n        directUrl,\n        candidates: candidatePayload,\n        profit: bestFin.netProfit,\n        marginPercent: bestFin.marginPercent,\n        targetBid: bestFin.targetBid,\n        totalTax: bestFin.totalTax,\n        vatPayable: bestFin.vatPayable,\n        citPayable: bestFin.citPayable,\n        logisticsCost: bestFin.logisticsCost,\n        geminiPrompt\n      }\n    });\n  }\n}\n\n// ШАГ 7: КВОТИРОВАНИЕ НА УРОВНЕ ЛОТОВ (ANTI-STARVATION FAIR LOT SELECTION)\noutput.sort((a, b) => (b.json.profit || 0) - (a.json.profit || 0));\n\nconst MAX_LOTS_PER_CATEGORY = 5;\nconst TOTAL_LOTS_LIMIT = 30;\nconst categoryCounts = new Map();\nconst selectedLots = [];\nconst overflowLots = [];\n\nfor (const lotItem of output) {\n  const tag = lotItem.json.categoryTag || 'other';\n  const cnt = categoryCounts.get(tag) || 0;\n  if (cnt < MAX_LOTS_PER_CATEGORY) {\n    selectedLots.push(lotItem);\n    categoryCounts.set(tag, cnt + 1);\n  } else {\n    overflowLots.push(lotItem);\n  }\n}\n\nwhile (selectedLots.length < TOTAL_LOTS_LIMIT && overflowLots.length > 0) {\n  selectedLots.push(overflowLots.shift());\n}\n\nif (selectedLots.length === 0) {\n  return [{ json: { empty: true, chatId } }];\n}\n\nreturn selectedLots;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1792,
+        112
+      ],
+      "id": "188a3c5e-f793-4ebf-9c1b-03d9ae293200",
+      "name": "Pre-Filter & Candidate Builder"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ !$json.empty && !$json.isVendorLocked }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        2016,
+        112
+      ],
+      "id": "ef9ba54d-7f18-4b3a-a3b9-5b804ea649fd",
+      "name": "Есть кандидаты для ИИ?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "x-goog-api-key",
+              "value": "={{ $json.geminiKey || $env.GEMINI_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": {{ JSON.stringify($json.geminiPrompt || \"{}\") }}\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"responseMimeType\": \"application/json\",\n    \"responseSchema\": {\n    \"type\": \"OBJECT\",\n    \"properties\": {\n        \"lotId\": {\n            \"type\": \"STRING\"\n        },\n        \"isCompatible\": {\n            \"type\": \"BOOLEAN\"\n        },\n        \"selectedCode\": {\n            \"type\": \"STRING\",\n            \"nullable\": true\n        },\n        \"selectedPrimaryCode\": {\n            \"type\": \"STRING\",\n            \"nullable\": true\n        },\n        \"selectedAccessoryCodes\": {\n            \"type\": \"ARRAY\",\n            \"items\": {\n                \"type\": \"STRING\"\n            }\n        },\n        \"bundleSummary\": {\n            \"type\": \"STRING\",\n            \"nullable\": true\n        },\n        \"matchBadge\": {\n            \"type\": \"STRING\",\n            \"enum\": [\n                \"🟢 ТОЧНОЕ СОВПАДЕНИЕ\",\n                \"🔴 НЕ ПОДХОДИТ\",\n                \"🔴 РИСК РНУ\",\n                \"🔴 ТРЕБУЕТСЯ VAD\"\n            ]\n        },\n        \"rnuRisk\": {\n            \"type\": \"STRING\",\n            \"enum\": [\n                \"НЕТ РИСКА\",\n                \"ВЫСОКИЙ РИСК РНУ\",\n                \"ВЫСОКИЙ РИСК РНУ: КОРРУПЦИОННАЯ ЗАТОЧКА\",\n                \"ВЫСОКИЙ (ПРОЕКТНАЯ ЗАЩИТА)\"\n            ]\n        },\n        \"verdict\": {\n            \"type\": \"STRING\"\n        }\n    },\n    \"required\": [\n        \"lotId\",\n        \"isCompatible\",\n        \"matchBadge\",\n        \"rnuRisk\",\n        \"verdict\"\n    ]\n}\n  }\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2240,
+        0
+      ],
+      "id": "0a8dbdfd-82aa-4e54-90b7-29157ccbaf81",
+      "name": "Gemini AI Инспектор",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ====================================================================\n// РАЗБОР ОТВЕТОВ GEMINI С СОПОСТАВЛЕНИЕМ СТРОГО ПО LOT_ID\n// ====================================================================\nconst geminiItems = $input.all();\nlet candidateItems = [];\ntry {\n  candidateItems = $('Pre-Filter & Candidate Builder').all().map(i => i.json).filter(Boolean);\n} catch (e) {\n  console.warn('[PARSE] Не удалось получить список кандидатов:', e.message);\n}\n\n// Построение хэш-карты кандидатов по всем возможным строковым идентификаторам\nconst candidateMap = new Map();\nfor (const cand of candidateItems) {\n  if (cand.lotId) candidateMap.set(String(cand.lotId).trim(), cand);\n  if (cand.lotNumber) candidateMap.set(String(cand.lotNumber).trim(), cand);\n  if (cand.rawLotId) candidateMap.set(String(cand.rawLotId).trim(), cand);\n}\n\n// Ветка 0 узла \"Есть кандидаты для ИИ?\" для строгого сопоставления по pairedItem\nlet ifBranch0 = [];\ntry {\n  ifBranch0 = $('Есть кандидаты для ИИ?').all().map(x => x.json).filter(Boolean);\n} catch (e) {}\n\nconst fallbackChatId = candidateItems[0]?.chatId || 681740470;\nconst results = [];\n\nfor (let i = 0; i < geminiItems.length; i++) {\n  try {\n    const geminiItem = geminiItems[i]?.json || {};\n\n    // Сопоставление с кандидатом строго через pairedItem либо через lotId из ответа\n    let pairedLotData = null;\n    const pairedIdx = geminiItems[i]?.pairedItem?.item !== undefined ? geminiItems[i].pairedItem.item : null;\n    if (pairedIdx !== null && ifBranch0[pairedIdx]) {\n      pairedLotData = ifBranch0[pairedIdx];\n    } else if (pairedIdx !== null && candidateItems[pairedIdx]) {\n      pairedLotData = candidateItems[pairedIdx];\n    }\n\n    // 1. ИЗВЛЕЧЕНИЕ СТРУКТУРИРОВАННОГО ОТВЕТА GEMINI\n    let verdict = {\n      lotId: null,\n      isCompatible: false,\n      selectedCode: null,\n      selectedPrimaryCode: null,\n      selectedAccessoryCodes: [],\n      bundleSummary: null,\n      matchBadge: '🔴 НЕ ПОДХОДИТ',\n      rnuRisk: 'РИСК РНУ',\n      verdict: 'Товар не соответствует ТЗ'\n    };\n\n    // Явная обработка технических сбоев API Gemini (таймаут, 429, 500)\n    if (geminiItem.error) {\n      const errMsg = geminiItem.error.message || JSON.stringify(geminiItem.error).substring(0, 150);\n      console.error(`[GEMINI API ERROR] Сбой в запросе #${i}: ${errMsg}`);\n      verdict.isCompatible = false;\n      verdict.matchBadge = '⚠️ СБОЙ API GEMINI (ТРЕБУЕТСЯ ПОВТОР)';\n      verdict.rnuRisk = 'ТЕХНИЧЕСКИЙ СБОЙ ИИ';\n      verdict.verdict = `Технический сбой API Gemini (${errMsg}). Требуется повторный запуск проверки.`;\n    } else {\n      try {\n        const rawText = geminiItem.candidates?.[0]?.content?.parts?.[0]?.text;\n        if (rawText) {\n          const parsed = typeof rawText === 'object' ? rawText : JSON.parse(rawText);\n          verdict = {\n            lotId: parsed.lotId ? String(parsed.lotId).trim() : null,\n            isCompatible: !!parsed.isCompatible,\n            selectedCode: parsed.selectedCode ? String(parsed.selectedCode).trim() : null,\n            selectedPrimaryCode: parsed.selectedPrimaryCode ? String(parsed.selectedPrimaryCode).trim() : null,\n            selectedAccessoryCodes: Array.isArray(parsed.selectedAccessoryCodes) ? parsed.selectedAccessoryCodes.map(String) : [],\n            bundleSummary: parsed.bundleSummary || null,\n            matchBadge: parsed.matchBadge || (parsed.isCompatible ? '🟢 ТОЧНОЕ СОВПАДЕНИЕ' : '🔴 НЕ ПОДХОДИТ'),\n            rnuRisk: parsed.rnuRisk || (parsed.isCompatible ? 'НЕТ РИСКА' : 'РИСК РНУ'),\n            verdict: parsed.verdict || ''\n          };\n        }\n      } catch (err) {\n        console.error(`[STRUCTURED PARSE ERROR] Ошибка парсинга JSON #${i}: ${err.message}`);\n        verdict.isCompatible = false;\n        verdict.matchBadge = '⚠️ СБОЙ API GEMINI (ТРЕБУЕТСЯ ПОВТОР)';\n        verdict.rnuRisk = 'ОШИБКА ФОРМАТА ИИ';\n        verdict.verdict = `Ошибка формата ответа Gemini: ${err.message}`;\n      }\n    }\n\n    // 2. СОПОСТАВЛЕНИЕ СТРОГО ПО LOT_ID / LOTNUMBER\n    let lotData = null;\n    if (verdict.lotId && candidateMap.has(verdict.lotId)) {\n      lotData = candidateMap.get(verdict.lotId);\n    } else if (pairedLotData) {\n      lotData = pairedLotData;\n    } else if (candidateItems[i]) {\n      lotData = candidateItems[i];\n    } else {\n      lotData = { lotId: verdict.lotId || `lot-${i}`, lotName: 'Неизвестный лот' };\n    }\n\n    // 3. ПРОВЕРКА HARD-LOCK (СТОП-МАРКЕРЫ И РИСК РНУ)\n    if (lotData.isVendorLocked) {\n      results.push({\n        json: {\n          isCompatible: false,\n          isVendorLocked: true,\n          tradeMethodId: Number(lotData.tradeMethodId || 3),\n          chatId: lotData.chatId || fallbackChatId,\n          lotId: lotData.lotId || '—',\n          lotName: lotData.lotName || '—',\n          lotQty: lotData.lotQty || 1,\n          lotBudget: lotData.lotBudget || 0,\n          directUrl: lotData.directUrl || '',\n          lockReason: lotData.lockReason || 'Проектный вендор / Заточка',\n          matchBadge: '🔴 РИСК РНУ: ЗАЛОЧЕННЫЙ ЛОТ',\n          rnuRisk: 'ВЫСОКИЙ РИСК РНУ',\n          aiVerdict: 'Обнаружен стоп-маркер: ' + (lotData.lockReason || 'Проектный VAD-дистрибьютор'),\n          productName: '—',\n          productCode: '—',\n          distributor: 'Al-Style',\n          totalCost: 0,\n          logisticsCost: 0,\n          profit: 0,\n          marginPercent: 0\n        }\n      });\n      continue;\n    }\n\n    // 4. РАСЧЕТ ИТОГОВ (ОДИНОЧНЫЙ ТОВАР ИЛИ КОМПЛЕКТ)\n    let chosenName = null;\n    let chosenCode = null;\n    let chosenDistributor = 'Al-Style';\n    let totalPurchaseCost = 0;\n    const qty = lotData.lotQty || 1;\n\n    if (verdict.isCompatible) {\n      if (lotData.isBundle) {\n        let primaryItem = (lotData.primaryCandidates || []).find(c => String(c.code).trim() === String(verdict.selectedPrimaryCode || '').trim());\n        if (!primaryItem && (lotData.primaryCandidates || []).length > 0) {\n          primaryItem = lotData.primaryCandidates[0];\n        }\n        if (primaryItem) {\n          chosenDistributor = primaryItem.distributor || 'Al-Style';\n          let bundleCost = primaryItem.price || 0;\n          const accessoryNames = [];\n          for (const accCode of verdict.selectedAccessoryCodes) {\n            const accItem = (lotData.accessoryCandidates || []).find(c => String(c.code).trim() === String(accCode).trim());\n            if (accItem) {\n              bundleCost += (accItem.price || 0);\n              accessoryNames.push(accItem.name.substring(0, 25));\n            }\n          }\n          totalPurchaseCost = bundleCost * qty;\n          chosenCode = primaryItem.code + (verdict.selectedAccessoryCodes.length ? '+' + verdict.selectedAccessoryCodes.join(',') : '');\n          chosenName = (verdict.bundleSummary || (primaryItem.name + (accessoryNames.length ? ' + ' + accessoryNames.join(', ') : '')));\n        } else {\n          verdict.isCompatible = false;\n        }\n      } else {\n        const candidates = lotData.candidates || [];\n        let chosen = null;\n        if (verdict.selectedCode) {\n          chosen = candidates.find(c => String(c.code).trim() === String(verdict.selectedCode).trim());\n        }\n        if (!chosen && verdict.verdict) {\n          for (const c of candidates) {\n            const cCode = String(c.code).trim();\n            if (cCode && (verdict.verdict.includes(cCode) || (c.name && verdict.verdict.includes(c.name.slice(0, 20))))) {\n              chosen = c;\n              break;\n            }\n          }\n        }\n        if (!chosen && candidates.length > 0) {\n          chosen = candidates[0];\n        }\n        if (chosen) {\n          totalPurchaseCost = (chosen.price || 0) * qty;\n          chosenCode = chosen.code;\n          chosenName = chosen.name;\n          chosenDistributor = chosen.distributor || 'Al-Style';\n        } else {\n          verdict.isCompatible = false;\n        }\n      }\n    }\n\n    // Финансово-налоговый расчет: СНР 3% (ФНО 910.00, без НДС и без КПН)\n    const SNR_TAX_RATE = 0.03;\n    const TARGET_DISCOUNT = 0.10;\n\n    const targetBid = lotData.targetBid || Math.round((lotData.lotBudget || 0) * (1 - TARGET_DISCOUNT));\n    \n    // Оптимизация логистики: для мелких партий (картриджи, кабели, флешки, мыши) доставка пакетом\n    const lotTitle = (lotData.lotName || '').toLowerCase();\n    const isSmall = /флеш|накопитель|картридж|тонер|мышь|клавиатур|патч-корд|кабель|гарнитур/i.test(lotTitle);\n    const logCost = isSmall ? Math.min(6000, 1500 * qty) : (3000 * qty);\n\n    const snrTax = Math.round(targetBid * SNR_TAX_RATE);\n    const vatPayable = 0; // ТОО на СНР не платит НДС\n    const citPayable = 0; // ТОО на СНР не платит КПН 20%\n    const totalTax = snrTax; // Ровно 3% от выручки\n\n    const safeCost = (typeof totalPurchaseCost === 'number' && !isNaN(totalPurchaseCost)) ? Math.round(totalPurchaseCost) : 0;\n    const totalExpenses = safeCost + logCost + totalTax;\n    let finalProfit = verdict.isCompatible ? (targetBid - totalExpenses) : 0;\n    if (isNaN(finalProfit)) finalProfit = 0;\n    let marginPct = targetBid > 0 ? (finalProfit / targetBid) * 100 : 0;\n    if (isNaN(marginPct)) marginPct = 0;\n\n    results.push({\n      json: {\n        isCompatible: verdict.isCompatible,\n        isBundle: !!lotData.isBundle,\n        isVendorLocked: false,\n        isManualReviewRequired: !!lotData.isManualReviewRequired,\n        tradeMethodId: Number(lotData.tradeMethodId || 3),\n        rawLotId: lotData.rawLotId,\n        annoNum: lotData.annoNum,\n        staleCatalog: !!lotData.staleCatalog,\n        matchBadge: verdict.matchBadge,\n        rnuRisk: verdict.rnuRisk,\n        aiVerdict: verdict.verdict,\n        chatId: lotData.chatId || fallbackChatId,\n        lotId: lotData.lotId || '—',\n        lotName: lotData.lotName || '—',\n        lotQty: qty,\n        lotBudget: lotData.lotBudget || 0,\n        targetBid,\n        directUrl: lotData.directUrl || '',\n        distributor: chosenDistributor || 'Al-Style',\n        productCode: chosenCode,\n        productName: chosenName,\n        totalCost: totalPurchaseCost,\n        logisticsCost: logCost,\n        vatPayable: 0,\n        citPayable: 0,\n        totalTax,\n        profit: Math.round(finalProfit),\n        marginPercent: +marginPct.toFixed(1)\n      }\n    });\n  } catch (lotParseErr) {\n    console.error('[PARSE LOT ERROR on item ' + i + ']:', lotParseErr.message);\n    const safeLot = candidateItems[i] || geminiItems[i]?.json || {};\n    results.push({\n      json: {\n        isCompatible: false,\n        error: lotParseErr.message,\n        lotId: safeLot.lotId || '—',\n        lotName: safeLot.lotName || '—',\n        distributor: 'Al-Style',\n        chatId: safeLot.chatId || fallbackChatId,\n        profit: 0,\n        marginPercent: 0\n      }\n    });\n  }\n}\n\nif (results.length === 0) {\n  return [{ json: { isCompatible: false, chatId: fallbackChatId } }];\n}\n\nconsole.log('[PARSE GEMINI] Всего лотов: ' + results.length + ', подтвержденных ИИ: ' + results.filter(r => r.json.isCompatible).length);\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2448,
+        0
+      ],
+      "id": "33052a4d-fc6a-4b34-9f7f-3b86b89b8da8",
+      "name": "Parse Gemini Verdict"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ====================================================================\n// УЗЕЛ: ДАЙДЖЕСТ И ЭКСПОРТ (РЕЖИМ «СЕНТЯБРЬ СОЛО» — РАСШИРЕННАЯ ВЫБОРКА)\n// Критерии: Маржа >= 15%, Статус 🟢 ТОЧНОЕ СОВПАДЕНИЕ, Все методы (ЗЦП, ОИ, ОК)\n// Без ограничения Топ-5: выдает всю выборку лотов для выполнения плана!\n// ====================================================================\nconst items = $input.all();\n\nlet chatId = 681740470;\ntry {\n  chatId = $('Auth & Command Router').first()?.json?.chatId || items[0]?.json?.chatId || 681740470;\n} catch (e) {\n  chatId = items[0]?.json?.chatId || 681740470;\n}\n\nfunction formatKZT(n) { \n  return Math.round(n || 0).toLocaleString('ru-RU') + ' ₸'; \n}\n\nfunction escapeHtml(text) {\n  if (!text) return '';\n  return String(text)\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;')\n    .replace(/\"/g, '&quot;');\n}\n\nfunction getMethodName(id) {\n  const numId = Number(id);\n  const map = {\n    1: 'Открытый конкурс',\n    2: 'Открытый конкурс (ОК)',\n    3: 'ЗЦП (Ценовые предложения)',\n    4: 'Один источник (ОИНЗ)',\n    5: 'Один источник (прямой)',\n    6: 'Аукцион',\n    7: 'Конкурс с ПКО',\n    8: 'Электронный магазин (Omarket)',\n    32: 'Конкурс с ПКО',\n    50: 'Один источник (ЗЦП)',\n    126: 'ЗЦП (квазигоссектор)',\n    130: 'ГЗПОП',\n    188: 'Конкурс (технадзор)'\n  };\n  return map[numId] || ('Способ ID ' + (id || 'ЗЦП'));\n}\n\nconst now = new Date().toLocaleString('ru-RU', { timeZone: 'Asia/Almaty' });\n\n// 1. Отбор ВСЕХ лотов под критерии Соло-режима (Маржа >= 15% И точное совпадение)\nconst eligibleLots = [];\nfor (const item of items) {\n  const d = item.json || {};\n  if (!d.isCompatible || !d.productCode) continue;\n\n  const margin = Number(d.marginPercent || 0);\n  const isExactMatch = d.matchBadge === '🟢 ТОЧНОЕ СОВПАДЕНИЕ';\n\n  const profit = Number(d.profit || 0);\n  const isHighMargin = margin >= 15;\n  const isHighProfit = profit >= 30000 && margin >= 5;\n\n  if ((isHighMargin || isHighProfit) && isExactMatch) {\n    eligibleLots.push(d);\n  }\n}\n\n// 2. Сортировка по убыванию маржинальности (самые прибыльные первыми)\neligibleLots.sort((a, b) => (Number(b.marginPercent) || 0) - (Number(a.marginPercent) || 0));\n\nconst rowsToExport = [];\nconst verifiedBullets = [];\nlet totalProfit = 0;\n\nfor (let i = 0; i < eligibleLots.length; i++) {\n  const d = eligibleLots[i];\n  totalProfit += (d.profit || 0);\n  const truncatedName = (d.productName || '').length > 45 ? d.productName.substring(0, 45) + '...' : (d.productName || '');\n  const safeName = escapeHtml(truncatedName);\n  const safeLotNum = escapeHtml(d.lotId);\n  const tag = d.isBundle ? '📦 <b>[КОМПЛЕКТ]</b> ' : '🔹 ';\n  const methodName = getMethodName(d.tradeMethodId);\n  const distName = d.distributor === 'ASBIS' ? '🏢 ASBIS' : '🏢 Al-Style';\n\n  verifiedBullets.push(\n    tag + '<b>#' + (i + 1) + ' | Лот № ' + safeLotNum + '</b>: <i>' + safeName + '</i> (' + d.lotQty + ' шт)\\n' +\n    '   • Поставщик: <b>' + distName + '</b> | Товар: <code>' + escapeHtml(d.productCode || '—') + '</code>\\n' +\n    '   • Способ: <b>' + escapeHtml(methodName) + '</b>\\n' +\n    '   • Бюджет: <b>' + formatKZT(d.lotBudget) + '</b> | Подача: <b>' + formatKZT(d.targetBid) + '</b> (-10%)\\n' +\n    '   • Закупка: <code>' + formatKZT(d.totalCost) + '</code> | Доставка: <code>' + formatKZT(d.logisticsCost) + '</code>\\n' +\n    '   • Налог СНР 3%: <code>' + formatKZT(d.totalTax) + '</code> <i>(ФНО 910.00, без НДС и КПН)</i>\\n' +\n    '   • <b>Чистая прибыль:</b> <code>+' + formatKZT(d.profit) + '</code> (<b>+' + (d.marginPercent || 0).toFixed(1) + '%</b>)\\n' +\n    '   • Статус: ' + d.matchBadge + ' | ' + (d.rnuRisk || 'НЕТ РИСКА') + '\\n' +\n    '   • <i>' + escapeHtml(d.aiVerdict) + '</i>\\n' +\n    '   🔗 <a href=\"' + d.directUrl + '\">Открыть лот на Госзакуп</a>'\n  );\n\n  rowsToExport.push({\n    'Дата': now,\n    'Менеджер': 'TenderSniper Almaty Solo',\n    'Поставщик': d.distributor || 'Al-Style',\n    'Номер_Лота': d.lotId,\n    'rawLotId': d.rawLotId,\n    'annoNum': d.annoNum,\n    'Способ_Закупки': methodName,\n    'Ссылка_Госзакуп': d.directUrl,\n    'Код': d.productCode,\n    'Товар': d.productName,\n    'Тип_Закупки': d.isBundle ? 'Комплект' : 'Одиночный',\n    'Кол-во': d.lotQty,\n    'Бюджет_Лота': d.lotBudget,\n    'Ставка_Подачи': d.targetBid,\n    'Закупка_Итого': d.totalCost,\n    'Доставка': d.logisticsCost,\n    'Налоги_ТОО_Итого': d.totalTax,\n    'НДС_к_Уплате': d.vatPayable,\n    'КПН_20%': d.citPayable,\n    'Чистая_Прибыль': d.profit,\n    'Запас_Маржи_%': (d.marginPercent || 0).toFixed(1) + '%',\n    'ИИ_Вердикт': d.aiVerdict,\n    'ИИ_Риск_РНУ': d.rnuRisk,\n    'Статус': 'Алматы Соло (Маржа ≥15%)'\n  });\n}\n\n// 3. Формирование сообщений для Telegram с защитой от лимита 4096 символов\nconst outputMessages = [];\n\nif (verifiedBullets.length > 0) {\n  const MAX_BODY_LEN = 3000;\n  const chunkList = [];\n  let curChunk = [];\n  let curLen = 0;\n\n  for (const b of verifiedBullets) {\n    if (curChunk.length > 0 && (curLen + b.length + 10) > MAX_BODY_LEN) {\n      chunkList.push(curChunk);\n      curChunk = [b];\n      curLen = b.length;\n    } else {\n      curChunk.push(b);\n      curLen += b.length + 10;\n    }\n  }\n  if (curChunk.length > 0) chunkList.push(curChunk);\n\n  const totalChunks = chunkList.length;\n\n  for (let c = 0; c < totalChunks; c++) {\n    const chunkBullets = chunkList[c];\n    const chunkHeader = (totalChunks > 1) \n      ? '🍎 <b>TENDERSNIPER LITE — АЛМАТЫ СОЛО</b> (' + (c + 1) + '/' + totalChunks + ')\\n━━━━━━━━━━━━━━━━━━━━\\n'\n      : '🍎 <b>TENDERSNIPER LITE — АЛМАТЫ СОЛО</b>\\n━━━━━━━━━━━━━━━━━━━━\\n';\n    \n    let chunkBody = '';\n    const hasStaleCatalog = eligibleLots.some(l => l.staleCatalog);\n    if (c === 0) {\n      if (hasStaleCatalog) {\n        chunkBody += '⚠️ <i>Внимание: Кэш каталога Al-Style старше 36 часов.</i>\\n\\n';\n      }\n      chunkBody += \n        '📍 <b>Регион:</b> г. Алматы (КАТО 75*) | Способы: ЗЦП, ОИ, ОК\\n' +\n        '🎯 <b>Отобрано лотов к подаче:</b> <b>' + eligibleLots.length + ' шт.</b> (Маржа ≥ 15%)\\n' +\n        '💰 <b>Общая прибыль по выборке:</b> <b>+' + formatKZT(totalProfit) + '</b>\\n\\n' +\n        '📦 <b>ОТОБРАННЫЕ ЛОТЫ:</b>\\n\\n';\n    }\n\n    chunkBody += chunkBullets.join('\\n\\n');\n\n    if (c === totalChunks - 1) {\n      chunkBody += '\\n\\n━━━━━━━━━━━━━━━━━━━━\\n📁 <i>Все ' + eligibleLots.length + ' лотов зафиксированы в Google Таблицу.</i>';\n    }\n\n    outputMessages.push({\n      text: chunkHeader + chunkBody,\n      chunkIndex: c,\n      isFirstChunk: c === 0\n    });\n  }\n} else {\n  let isApiFailure = false;\n  let isCatalogError = false;\n  try {\n    isApiFailure = $('Pre-Filter & Candidate Builder').first()?.json?.apiFailure ||\n                   $('Document Extraction Layer').first()?.json?.apiFailure ||\n                   $('Merge & Deduplicate Lots').first()?.json?.apiFailure || false;\n    isCatalogError = $('Pre-Filter & Candidate Builder').first()?.json?.catalogLoadError || false;\n  } catch (e) {}\n\n  if (isCatalogError) {\n    outputMessages.push({\n      text:\n        '❌ <b>TENDERSNIPER LITE — ОШИБКА КАТАЛОГА</b>\\n━━━━━━━━━━━━━━━━━━━━\\n' +\n        '📍 <b>Регион:</b> г. Алматы (КАТО 75*)\\n\\n' +\n        'Не удалось загрузить номенклатуру каталога Al-Style (файл кэша отсутствует или повреждён).\\n' +\n        'Проверьте наличие файла кэша <code>alstyle_catalog_cache.json</code> на сервере n8n.',\n      chunkIndex: 0,\n      isFirstChunk: true\n    });\n  } else if (isApiFailure) {\n    outputMessages.push({\n      text:\n        '⚠️ <b>TENDERSNIPER LITE — АЛМАТЫ СОЛО</b>\\n━━━━━━━━━━━━━━━━━━━━\\n' +\n        '📍 <b>Регион:</b> г. Алматы (КАТО 75*)\\n\\n' +\n        '❌ <b>Сбой соединения с порталом Госзакупок (ЦЭФ GraphQL API)!</b>\\n\\n' +\n        'Все запросы завершились ошибкой авторизации или сетевым тайм-аутом. Проверьте актуальность <code>GOSZAKUP_TOKEN</code> в переменных окружения n8n.\\n\\n' +\n        '<i>Следующая автоматическая попытка: 09:30 или 13:00 (Asia/Almaty).</i>',\n      chunkIndex: 0,\n      isFirstChunk: true\n    });\n  } else {\n    outputMessages.push({\n      text:\n        '🍎 <b>TENDERSNIPER LITE — АЛМАТЫ СОЛО</b>\\n━━━━━━━━━━━━━━━━━━━━\\n' +\n        '📍 <b>Регион:</b> г. Алматы (КАТО 75*) | Способы: ЗЦП, ОИ, ОК\\n\\n' +\n        'За текущий цикл подходящих лотов по Алматы с маржой <b>≥ 15%</b> и <b>100% точным совпадением</b> не найдено.\\n' +\n        '<i>Следующая проверка: 09:30 или 13:00 (Asia/Almaty).</i>',\n      chunkIndex: 0,\n      isFirstChunk: true\n    });\n  }\n}\n\nconsole.log('[ALMATY EXPANDED DIGEST] Отобрано лотов: ' + eligibleLots.length + ', прибыль: ' + totalProfit + ' KZT, сообщений: ' + outputMessages.length);\n\n// Блокировка сканирования staticData.lastScanTime = 0 снимается исключительно в терминальном узле сохранения истории либо по истечении таймаута LOCK_TIMEOUT_MS\n\n// Возвращаем сообщения для отправки в Telegram\nreturn outputMessages.map(m => ({\n  json: {\n    chatId,\n    hasMatches: rowsToExport.length > 0 && m.isFirstChunk,\n    isFirstChunk: m.isFirstChunk,\n    chunkIndex: m.chunkIndex,\n    matchedCount: rowsToExport.length,\n    summaryMessage: m.text,\n    rowsToExport: m.isFirstChunk ? rowsToExport : []\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2672,
+        112
+      ],
+      "id": "d2fd3c45-0116-4c8e-9c4b-449c2efb5d3b",
+      "name": "Build Digest & Export Rows",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.summaryMessage }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2912,
+        0
+      ],
+      "id": "c5e93bf0-47f2-4770-8128-1a407ad5b7d0",
+      "name": "Send Executive Digest",
+      "webhookId": "tendersniper-almaty-send-digest",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "telegramApi": {
+          "id": "zYXHO9vsYSxUvRob",
+          "name": "TendersniperAlmatybot API"
+        }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.hasMatches }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        2912,
+        208
+      ],
+      "id": "18471164-2cef-4130-9e57-843183a9eaa6",
+      "name": "Are New Lots Found?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.first()?.json?.rowsToExport || [];\nreturn rows.map(r => ({ json: r }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3136,
+        208
+      ],
+      "id": "5f8f851f-6209-47a9-a30c-b18f9bbdfdfa",
+      "name": "Prepare Rows for Sheets"
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1STsppqSSCRelP2XdSq6JSIUOoF2IJiCd-oNRGGo_NSM",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Кандидаты Алматы",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {}
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        3360,
+        208
+      ],
+      "id": "06460b72-c3ad-4505-aef4-7afa56c82fbd",
+      "name": "Save to Кандидаты Алматы",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "googleApi": {
+          "id": "aNCFRMVEJxT1dG3j",
+          "name": "Google Service Account account"
+        }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $('Build Digest & Export Rows').first()?.json?.rowsToExport || [];\nconst now = new Date().toLocaleString('ru-RU', { timeZone: 'Asia/Almaty' });\nreturn rows.map(r => ({ json: { 'Номер_Лота': r['Номер_Лота'], 'Дата_отправки': now } }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3568,
+        208
+      ],
+      "id": "76fba658-6419-43b2-9f73-98fe026caf11",
+      "name": "Prepare History IDs"
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1yG8w71r5KB8Mmi7Nc7U100TzNUfwMltZ5Z2ig1VSR38",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "История лотов",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {}
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        3792,
+        208
+      ],
+      "id": "746d4ab0-7dd8-4627-b8b2-679240981805",
+      "name": "Save to История лотов",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "googleApi": {
+          "id": "aNCFRMVEJxT1dG3j",
+          "name": "Google Service Account account"
+        }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ====================================================================\n// УЗЕЛ: DOCUMENT EXTRACTION LAYER v5.3 (МУЛЬТИМОДАЛЬНЫЙ СЛОЙ ТЗ)\n// Параллелизация батчами, защита от тяжелых PDF (>15 МБ),\n// умная выжимка ТТХ со 2-3 страниц, сборщик мусора doc_cache (14 дней).\n// ====================================================================\nconst fs = require('fs');\nconst https = require('https');\nconst http = require('http');\n\nfunction httpRequest(url, options = {}) {\n  return new Promise((resolve, reject) => {\n    const timer = setTimeout(() => reject(new Error('HTTP timeout (' + (options.timeout || 25000) + 'ms)')), options.timeout || 25000);\n    const client = url.startsWith('https') ? https : http;\n    const req = client.request(url, options, (res) => {\n      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {\n        clearTimeout(timer);\n        return httpRequest(res.headers.location, options).then(resolve, reject);\n      }\n      const chunks = [];\n      res.on('data', chunk => chunks.push(chunk));\n      res.on('end', () => {\n        clearTimeout(timer);\n        const buffer = Buffer.concat(chunks);\n        resolve({\n          ok: res.statusCode >= 200 && res.statusCode < 300,\n          status: res.statusCode,\n          buffer,\n          text: () => buffer.toString('utf8'),\n          json: () => JSON.parse(buffer.toString('utf8'))\n        });\n      });\n      res.on('error', err => {\n        clearTimeout(timer);\n        reject(err);\n      });\n    });\n    req.on('error', err => {\n      clearTimeout(timer);\n      reject(err);\n    });\n    if (options.body) req.write(options.body);\n    req.end();\n  });\n}\n\nconst GOSZAKUP_TOKEN = (typeof $env !== 'undefined' && $env.GOSZAKUP_TOKEN) || (typeof process !== 'undefined' && process.env?.GOSZAKUP_TOKEN) || '';\nconst GEMINI_API_KEY = (typeof $env !== 'undefined' && $env.GEMINI_API_KEY) || (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) || '';\nconst CACHE_DIR = '/home/node/.n8n/doc_cache';\nconst MAX_PDF_BYTES = 15 * 1024 * 1024; // 15 MB\nconst CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000; // 14 дней\n\nif (!fs.existsSync(CACHE_DIR)) {\n  try { fs.mkdirSync(CACHE_DIR, { recursive: true }); } catch (e) {}\n}\n\n// 1. СБОРЩИК МУСОРА КЭША (GC): удаление файлов старше 14 дней\ntry {\n  const nowMs = Date.now();\n  const cachedFiles = fs.readdirSync(CACHE_DIR);\n  let cleanedCount = 0;\n  for (const f of cachedFiles) {\n    if (f.endsWith('.txt')) {\n      const fPath = `${CACHE_DIR}/${f}`;\n      const stats = fs.statSync(fPath);\n      if (nowMs - stats.mtimeMs > CACHE_TTL_MS) {\n        fs.unlinkSync(fPath);\n        cleanedCount++;\n      }\n    }\n  }\n  if (cleanedCount > 0) {\n    console.log(`[DOC_CACHE GC] Удалено устаревших файлов кэша (>14 дней): ${cleanedCount}`);\n  }\n} catch (e) {\n  console.warn('[DOC_CACHE GC WARN]', e.message);\n}\n\n// 2. Получаем все лоты и историю\nlet allLots = [];\ntry {\n  const mergeData = $('Merge & Deduplicate Lots').first()?.json;\n  allLots = mergeData?.data?.Lots || [];\n} catch (e) {\n  console.error('[DOC_EXTRACT] Ошибка получения лотов:', e.message);\n}\n\nlet historyRows = [];\ntry {\n  historyRows = $('Fetch Lot History').all().map(i => i.json).filter(Boolean);\n} catch (e) {}\n\nconst sentLotIds = new Set();\nfor (const r of historyRows) {\n  for (const [k, v] of Object.entries(r)) {\n    const lk = k.toLowerCase();\n    if (lk.includes('номер') || lk.includes('лот') || lk.includes('id')) {\n      if (v) sentLotIds.add(String(v).trim());\n    }\n  }\n}\n\n// 3. Отбираем свежие лоты\nconst freshLots = allLots.filter(l => {\n  const lotNum = String(l.lotNumber || l.id).trim();\n  const lotId = String(l.id).trim();\n  return !sentLotIds.has(lotNum) && !sentLotIds.has(lotId);\n});\n\nconsole.log(`[DOC_EXTRACT] Всего лотов: ${allLots.length} | Свежих для проверки ТЗ: ${freshLots.length}`);\n\n// Вспомогательные функции\nasync function downloadPdf(url) {\n  const res = await httpRequest(url, {\n    headers: { \n      'Authorization': 'Bearer ' + GOSZAKUP_TOKEN,\n      'User-Agent': 'Mozilla/5.0'\n    },\n    timeout: 20000\n  });\n  if (!res.ok) throw new Error(`HTTP ${res.status}`);\n  return res.buffer;\n}\n\nasync function extractWithGemini(pdfBuffer) {\n  const geminiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=' + GEMINI_API_KEY;\n  const payload = JSON.stringify({\n    contents: [\n      {\n        parts: [\n          {\n            inlineData: {\n              mimeType: 'application/pdf',\n              data: pdfBuffer.toString('base64')\n            }\n          },\n          {\n            text: 'Извлеки ТОЛЬКО технические характеристики: параметры, таблицы ТТХ, спецификации, точную модель картриджа/принтера/устройства, артикул, поддерживаемые модели принтеров. Исключи вводные юридические разделы и адреса. Максимум 500 символов. Если характеристик нет — верни пустую строку.'\n          }\n        ]\n      }\n    ]\n  });\n\n  const res = await httpRequest(geminiUrl, {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/json' },\n    body: payload,\n    timeout: 30000\n  });\n\n  if (!res.ok) {\n    const errBody = res.text().substring(0, 150);\n    throw new Error(`Gemini HTTP ${res.status}: ${errBody}`);\n  }\n  const data = res.json();\n  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';\n}\n\nfunction pickTechSpecPdf(files) {\n  if (!Array.isArray(files) || files.length === 0) return null;\n  const pdfs = files.filter(f => f.originalName && /\\.pdf$/i.test(f.originalName.trim()) && f.filePath);\n  if (pdfs.length === 0) return null;\n  const match = pdfs.find(f => {\n    const combined = ((f.originalName || '') + ' ' + (f.nameRu || '')).toLowerCase();\n    return /techspec|техспецификац|спецификац|тз|приложение/i.test(combined);\n  });\n  return match || pdfs[0];\n}\n\nasync function processSingleLot(lot) {\n  const targetFile = pickTechSpecPdf(lot.Files);\n  if (!targetFile) {\n    lot.enrichedDesc = lot.descriptionRu || lot.nameRu || '';\n    return;\n  }\n\n  const cacheKey = `${lot.id}_${targetFile.id || 'f'}.txt`;\n  const cachePath = `${CACHE_DIR}/${cacheKey}`;\n\n  let extractedText = '';\n\n  // Проверка кэша\n  if (fs.existsSync(cachePath)) {\n    try {\n      extractedText = fs.readFileSync(cachePath, 'utf8');\n      console.log(`[DOC_EXTRACT CACHE HIT] Лот ${lot.lotNumber} -> ${cacheKey}`);\n    } catch (e) {}\n  }\n\n  if (!extractedText) {\n    try {\n      console.log(`[DOC_EXTRACT FETCH] Лот ${lot.lotNumber}: скачивание ${targetFile.originalName}...`);\n      const pdfBuf = await downloadPdf(targetFile.filePath);\n\n      // Защита от переполнения payload (> 15 MB)\n      if (pdfBuf.length > MAX_PDF_BYTES) {\n        console.warn(`[DOC_EXTRACT WARN: FILE_TOO_LARGE] Лот ${lot.lotNumber}: файл ${(pdfBuf.length / (1024 * 1024)).toFixed(1)} МБ превышает лимит 15 МБ`);\n        lot.isManualReviewRequired = true;\n        lot.enrichedDesc = `[⚠️ ТРЕБУЕТСЯ РУЧНОЙ АУДИТ СКАНА ТЗ (>15 МБ)]: ${lot.descriptionRu || lot.nameRu || ''}`;\n        return;\n      }\n\n      if (pdfBuf && pdfBuf.length > 500 && pdfBuf.subarray(0, 4).toString() === '%PDF') {\n        extractedText = await extractWithGemini(pdfBuf);\n        if (extractedText) {\n          try { fs.writeFileSync(cachePath, extractedText, 'utf8'); } catch (e) {}\n          console.log(`[DOC_EXTRACT SUCCESS] Лот ${lot.lotNumber}: извлечено ${extractedText.length} симв.`);\n        }\n      } else {\n        console.warn(`[DOC_EXTRACT WARN] Лот ${lot.lotNumber}: файл не является валидным PDF`);\n      }\n    } catch (err) {\n      console.warn(`[DOC_EXTRACT FAILED] Лот ${lot.lotNumber}: ${err.message}`);\n      lot.docExtractionError = err.message;\n    }\n  }\n\n  if (extractedText) {\n    // Интеллектуальное усечение: сохраняем ключевые ТТХ\n    let cleanedDoc = extractedText;\n    if (cleanedDoc.length > 4000) {\n      cleanedDoc = cleanedDoc.substring(0, 4000) + '\\n... [ТТХ усечены по лимиту 4000 симв.]';\n    }\n    const baseDesc = (lot.descriptionRu || lot.nameRu || '').trim();\n    lot.enrichedDesc = `[КРАТКОЕ ОПИСАНИЕ С ПОРТАЛА]:\\n${baseDesc}\\n\\n=== ТЕХНИЧЕСКАЯ СПЕЦИФИКАЦИЯ ИЗ ПРИКРЕПЛЕННОГО ФАЙЛА (${targetFile.originalName}): ===\\n${cleanedDoc}`;\n  } else {\n    lot.enrichedDesc = lot.descriptionRu || lot.nameRu || '';\n  }\n}\n\n// 4. ПАРАЛЛЕЛИЗАЦИЯ: батчи по 4 одновременных запроса к Gemini\nconst lotsToProcess = freshLots.slice(0, 30);\nconst CONCURRENCY = 4;\nfor (let i = 0; i < lotsToProcess.length; i += CONCURRENCY) {\n  const chunk = lotsToProcess.slice(i, i + CONCURRENCY);\n  await Promise.all(chunk.map(l => processSingleLot(l)));\n}\n\n// Для остальных лотов (ранее виденных)\nfor (const lot of allLots) {\n  if (!lot.enrichedDesc) {\n    lot.enrichedDesc = lot.descriptionRu || lot.nameRu || '';\n  }\n}\n\n// Возвращаем единый агрегированный объект, а распаковка в массив выполняется в Pre-Filter\nreturn [{\n  json: {\n    ready: true,\n    totalLots: allLots.length,\n    freshLotsCount: freshLots.length,\n    processedCount: lotsToProcess.length,\n    enrichedLots: allLots\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        112
+      ],
+      "id": "doc-extraction-layer-001",
+      "name": "Document Extraction Layer"
+    },
+    {
+      "parameters": {
+        "jsCode": "const prev = $input.all();\nconst first = prev[0]?.json || {};\n\nif (first.hasMatches === false) {\n  console.log('[PIPELINE COMPLETE] Новых подходящих лотов (маржа ≥15%) не обнаружено. Экспорт в Таблицы пропущен.');\n} else {\n  const histError = prev.find(item => item.json?.error);\n  if (histError) {\n    const errMsg = histError.json.error?.message || JSON.stringify(histError.json.error).substring(0, 150);\n    console.warn('[GOOGLE SHEETS WARN] Не удалось сохранить историю в \"История лотов\": ' + errMsg);\n  } else {\n    console.log('[GOOGLE SHEETS SUCCESS] ✅ Успешно зафиксировано ' + prev.length + ' записей во вкладку \"История лотов\"!');\n  }\n}\n\n// Освобождаем блокировку сканирования в терминальной точке конвейера\ntry {\n  const staticData = $getWorkflowStaticData('global');\n  staticData.lastScanTime = 0;\n  console.log('[AUTH LOCK] Блокировка сканирования успешно снята.');\n} catch (e) {}\n\nreturn prev;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2368,
+        368
+      ],
+      "id": "a1b2c3d4-e5f6-4789-abcd-0123456789ef",
+      "name": "Log Sheets Final Result"
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Auth & Command Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auth & Command Router": {
+      "main": [
+        [
+          {
+            "node": "Проверка доступа и команды",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Проверка доступа и команды": {
+      "main": [
+        [
+          {
+            "node": "Generate IT Keywords",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Direct / Auth Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate IT Keywords": {
+      "main": [
+        [
+          {
+            "node": "Fetch IT Lots from ЦЭФ",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch IT Lots from ЦЭФ": {
+      "main": [
+        [
+          {
+            "node": "Merge & Deduplicate Lots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge & Deduplicate Lots": {
+      "main": [
+        [
+          {
+            "node": "Fetch Lot History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Lot History": {
+      "main": [
+        [
+          {
+            "node": "Document Extraction Layer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Al-Style Catalog": {
+      "main": [
+        [
+          {
+            "node": "Pre-Filter & Candidate Builder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pre-Filter & Candidate Builder": {
+      "main": [
+        [
+          {
+            "node": "Есть кандидаты для ИИ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Есть кандидаты для ИИ?": {
+      "main": [
+        [
+          {
+            "node": "Gemini AI Инспектор",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Digest & Export Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini AI Инспектор": {
+      "main": [
+        [
+          {
+            "node": "Parse Gemini Verdict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Gemini Verdict": {
+      "main": [
+        [
+          {
+            "node": "Build Digest & Export Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Digest & Export Rows": {
+      "main": [
+        [
+          {
+            "node": "Send Executive Digest",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Are New Lots Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Are New Lots Found?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Rows for Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Sheets Final Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Rows for Sheets": {
+      "main": [
+        [
+          {
+            "node": "Save to Кандидаты Алматы",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare History IDs": {
+      "main": [
+        [
+          {
+            "node": "Save to История лотов",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Document Extraction Layer": {
+      "main": [
+        [
+          {
+            "node": "Fetch Al-Style Catalog",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule (09:30 & 13:00 Almaty)": {
+      "main": [
+        [
+          {
+            "node": "Auth & Command Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to Кандидаты Алматы": {
+      "main": [
+        [
+          {
+            "node": "Prepare History IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to История лотов": {
+      "main": [
+        [
+          {
+            "node": "Log Sheets Final Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "staticData": {
+    "node:Schedule (08:30 & 13:00 Almaty)": {
+      "recurrenceRules": [
+        null,
+        null
+      ],
+      "recurrenceRuleSignatures": [
+        null,
+        null
+      ]
+    },
+    "global": {
+      "lastScanTime": 0
+    },
+    "node:Schedule (09:30 & 13:00 Almaty)": {
+      "recurrenceRules": [
+        null,
+        null
+      ],
+      "recurrenceRuleSignatures": [
+        null,
+        null
+      ]
+    }
+  },
+  "tags": []
+}
