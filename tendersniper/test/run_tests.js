@@ -67,7 +67,8 @@ const LOTS = [
   lot('L-FURN', 'Шкаф для одежды', 'Шкаф для одежды двухстворчатый', 200000, 1),
   lot('L-LATE', 'Ноутбук', 'Ноутбук 14", срочно', 700000, 2, { TrdBuy: { id: 1, endDate: inHours(1) } }),
   lot('L-REJ', 'Принтер', 'Принтер лазерный цветной A4', 250000, 1),
-  lot('L-BADCODE', 'Коммутатор 8 портов', 'Коммутатор 8 портов неуправляемый', 60000, 1)
+  lot('L-BADCODE', 'Коммутатор 8 портов', 'Коммутатор 8 портов неуправляемый', 60000, 1),
+  lot('L-PLAN', 'Монитор', 'Монитор 27 дюймов (пункт плана)', 400000, 2, { TrdBuy: null, trdBuyId: null, trdBuyNumberAnno: null })
 ];
 
 // ---------------- Моки внешних API ----------------
@@ -191,6 +192,7 @@ async function test(name, fn) {
   await test('Гео: лот с КАТО области (заказчик «г. Алматы») отсеян', () => assert.ok(!rowIds.includes('L-REGION') && !parsedById['L-REGION']));
   await test('Вендор-лок Cisco не в выгрузке, но посчитан в сводке', () => { assert.ok(!rowIds.includes('L-VAD')); assert.ok(/вендор-локам[^:]*: 1/.test(digestText)); });
   await test('Мебель отсеяна', () => assert.ok(!parsedById['L-FURN']));
+  await test('Лот без объявления (TrdBuy: null, пункт плана) отсеян', () => assert.ok(!parsedById['L-PLAN'] && !rowIds.includes('L-PLAN')));
   await test('Лот с дедлайном через 1 ч отсеян', () => assert.ok(!parsedById['L-LATE'] && p1.merged[0].json.skippedDeadline === 1));
   await test('Отклонённый ИИ лот не в выгрузке, посчитан как отклонённый', () => { assert.ok(!rowIds.includes('L-REJ')); assert.ok(/Отклонено ИИ: 1/.test(digestText)); });
   await test('Неизвестный код от ИИ → «ручная проверка», а не первый кандидат', () => {

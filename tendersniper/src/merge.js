@@ -15,6 +15,7 @@ let totalRaw = 0;
 let skippedOtherRegions = 0;
 let skippedDeadline = 0;
 let skippedMethod = 0;
+let skippedNoAnnounce = 0;
 let withDeadline = 0;
 
 const RE_ALMATY_CITY = /(?:^|[^\wа-яё])(?:г\.?[ \t]*алматы|город[ \t]+алматы)(?:[^\wа-яё]|$)/i;
@@ -64,6 +65,10 @@ for (const item of allItems) {
 
     if (excludedMethods.size && excludedMethods.has(Number(lot.refTradeMethodsId))) { skippedMethod++; continue; }
 
+    // Лот без объявления о закупке (пункт плана, TrdBuy: null) — подать заявку невозможно.
+    // Проверяется только при расширенном запросе, когда поле TrdBuy присутствует в ответе.
+    if ('TrdBuy' in lot && !lot.TrdBuy && !lot.trdBuyId) { skippedNoAnnounce++; continue; }
+
     // Нормализация расширенных полей
     lot.trdBuyId = lot.trdBuyId || lot.TrdBuy?.id || null;
     const endDate = parsePortalDate(lot.TrdBuy?.endDate);
@@ -83,7 +88,7 @@ if (apiFailure) {
 }
 
 console.log(`[MERGE ALMATY SOLO] Всего лотов: ${totalRaw} | Других регионов: ${skippedOtherRegions} | Дедлайн < ${TS_CONFIG.MIN_HOURS_TO_DEADLINE}ч: ${skippedDeadline} | ` +
-  `Исключённые способы: ${skippedMethod} | Алматы: ${allLots.length} | С известным дедлайном: ${withDeadline} | Ошибок API: ${errorCount} (+частичных: ${partialErrorCount})`);
+  `Исключённые способы: ${skippedMethod} | Без объявления: ${skippedNoAnnounce} | Алматы: ${allLots.length} | С известным дедлайном: ${withDeadline} | Ошибок API: ${errorCount} (+частичных: ${partialErrorCount})`);
 
 return [{
   json: {

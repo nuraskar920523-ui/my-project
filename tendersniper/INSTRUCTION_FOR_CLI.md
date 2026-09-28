@@ -142,7 +142,7 @@ ls -la ./backup_tendersniper_$TS.json
 python3 build.py
 docker run --rm -e TS_TEST_SANDBOX=1 -v "$PWD":/w -w /w node:22 node test/run_tests.js
 ```
-Ожидается `OK -> dist/TenderSniper_Lite_Almaty.json (22 узлов)` и `Итого: 31/31 тестов пройдено`.
+Ожидается `OK -> dist/TenderSniper_Lite_Almaty.json (22 узлов)` и `Итого: 32/32 тестов пройдено`.
 Проверь, что `git status` не показывает изменений в `dist/`: собранный файл должен совпадать с закоммиченным.
 **⛔ СТОП** при любом упавшем тесте или расхождении.
 
@@ -186,7 +186,7 @@ Docker недоступен: запускай тесты только на от�
 
 В execution запуска `/scan` проверь логи узлов (Console):
 - `Fetch IT Lots from ЦЭФ`: `[FETCH] Используется уровень запроса: …` совпадает с результатом шага 1.4;
-- `Merge & Deduplicate Lots`: `[MERGE ALMATY SOLO] … Алматы: N` при N > 0;
+- `Merge & Deduplicate Lots`: `[MERGE ALMATY SOLO] … Без объявления: … | Алматы: N` при N > 0;
 - `Document Extraction Layer`: нет `GEMINI_API_KEY не найден`;
 - `Pre-Filter & Candidate Builder`: `[PRE-FILTER V5.4] Индексировано: …` с товарами больше 1000;
 - `Gemini AI Инспектор`: `Ошибок: 0` (или единицы). Если ошибки у всех лотов, смотри текст ошибки в `Parse Gemini Verdict`. Частая причина: неверное имя модели, тогда владелец задаёт `GEMINI_MODEL`;
