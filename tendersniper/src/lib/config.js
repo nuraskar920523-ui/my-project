@@ -6,6 +6,8 @@ const TS_CONFIG = {
   REGISTRY_PATH: '/home/node/.n8n/tendersniper_registry.json',
   LOCK_PATH: '/home/node/.n8n/tendersniper_scan.lock',
   LOCK_TIMEOUT_MS: 20 * 60 * 1000,
+  RADAR_DB_PATH: '/home/node/.n8n/tendersniper_radar_db.json',
+  RADAR_LOCK_PATH: '/home/node/.n8n/tendersniper_radar.lock',
   CHECKED_TTL_DAYS: 7,
   SENT_TTL_DAYS: 120,
   GEMINI_MODEL_DEFAULT: 'gemini-3.8-flash',

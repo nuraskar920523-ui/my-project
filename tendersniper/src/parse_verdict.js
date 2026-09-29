@@ -39,6 +39,8 @@ for (const d of items) {
       isBundle: !!d.isBundle,
       staleCatalog: !!d.staleCatalog,
       endDate: d.endDate || null,
+      customerBin: d.customerBin || null,
+      customerName: d.customerName || '',
       trdBuyId: d.trdBuyId || null,
       isManualReviewRequired: !!d.isManualReviewRequired,
       docExtractionError: d.docExtractionError || null,

@@ -9,6 +9,8 @@ const fs = require('fs');
 //@@include:registry
 //@@include:regex_util
 //@@include:finance
+//@@include:radar
+//@@include:radar_seed
 
 const items = $input.all();
 
@@ -93,6 +95,15 @@ try { mergeMeta = $('Merge & Deduplicate Lots').first()?.json || {}; } catch (e)
 // 2. Сортировка по убыванию маржинальности (самые прибыльные первыми)
 eligibleLots.sort((a, b) => (Number(b.marginPercent) || 0) - (Number(a.marginPercent) || 0));
 
+// Радар демпинга: база итогов закупок (заполняет отдельный workflow Radar Collector)
+let radarIndex = null;
+try {
+  const radarDb = tsLoadRadarDb(fs);
+  if (Object.keys(radarDb.lots).length) radarIndex = tsRadarBuildIndex(radarDb);
+} catch (e) {
+  console.warn('[RADAR] База радара не прочитана: ' + e.message);
+}
+
 const rowsToExport = [];
 const verifiedBullets = [];
 let totalProfit = 0;
@@ -107,6 +118,18 @@ for (let i = 0; i < eligibleLots.length; i++) {
   const tag = d.isBundle ? '📦 <b>[КОМПЛЕКТ]</b> ' : '🔹 ';
   const methodName = getMethodName(d.tradeMethodId);
   const distName = d.distributor === 'ASBIS' ? '🏢 ASBIS' : '🏢 Al-Style';
+  let radarText = '';
+  let radarRisk = null;
+  if (radarIndex) {
+    try {
+      const ra = tsRadarAssess(radarIndex, { customerBin: d.customerBin, name: d.lotName, budget: d.lotBudget });
+      const econ = tsRadarEconomics(ra, { budget: d.lotBudget, totalCost: d.totalCost, logistics: d.logisticsCost });
+      radarRisk = TS_RADAR_RISK_LABEL[econ.risk];
+      radarText = tsRadarLines(ra, econ, escapeHtml).join('\n') + '\n';
+    } catch (e) {
+      console.warn('[RADAR] Оценка лота ' + d.lotId + ' не удалась: ' + e.message);
+    }
+  }
 
   verifiedBullets.push(
     tag + '<b>#' + (i + 1) + ' | Лот № ' + safeLotNum + '</b>: <i>' + safeName + '</i> (' + d.lotQty + ' шт)\n' +
@@ -118,6 +141,7 @@ for (let i = 0; i < eligibleLots.length; i++) {
     '   • <b>Чистая прибыль:</b> <code>+' + formatKZT(d.profit) + '</code> (<b>+' + (d.marginPercent || 0).toFixed(1) + '%</b>)\n' +
     '   • Статус: ' + d.matchBadge + ' | ' + (d.rnuRisk || 'НЕТ РИСКА') + '\n' +
     (d.isManualReviewRequired ? '   • ⚠️ <i>Скан ТЗ слишком большой — сверьте ТЗ вручную</i>\n' : '') +
+    radarText +
     '   • <i>' + escapeHtml(truncate(d.aiVerdict, 350)) + '</i>\n' +
     '   🔗 <a href="' + escapeHtml(d.directUrl) + '">Открыть лот на Госзакуп</a>'
   );
@@ -146,7 +170,8 @@ for (let i = 0; i < eligibleLots.length; i++) {
     'Запас_Маржи_%': (d.marginPercent || 0).toFixed(1) + '%',
     'ИИ_Вердикт': d.aiVerdict,
     'ИИ_Риск_РНУ': d.rnuRisk,
-    'Статус': 'Алматы Соло (' + CRITERIA_TEXT + ')' + (d.endDate ? ' | дедлайн ' + formatDeadline(d.endDate) : '')
+    'Статус': 'Алматы Соло (' + CRITERIA_TEXT + ')' + (d.endDate ? ' | дедлайн ' + formatDeadline(d.endDate) : '') +
+      (radarRisk ? ' | демпинг: ' + radarRisk.replace(/^\S+\s/, '') : '')
   });
 }
 

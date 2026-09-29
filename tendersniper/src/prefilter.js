@@ -421,6 +421,8 @@ for (const lot of recentLots) {
     ? 'https://goszakup.gov.kz/ru/announce/index/' + encodeURIComponent(lot.trdBuyId)
     : 'https://goszakup.gov.kz/ru/search/lots?filter%5Bcustomer%5D=&filter%5Bnumber%5D=' + encodeURIComponent(lot.lotNumber || lotDisplayNum);
   const lotMeta = {
+    customerBin: lot.customerBin || null,
+    customerName: lot.customerNameRu || '',
     endDate: lot.endDate || null,
     trdBuyId: lot.trdBuyId || null,
     isManualReviewRequired: !!lot.isManualReviewRequired,

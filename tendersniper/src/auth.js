@@ -5,6 +5,7 @@ const fs = require('fs');
 //@@include:config
 //@@include:lock
 //@@include:registry
+//@@include:radar
 
 const inputData = $input.first()?.json || {};
 
@@ -94,6 +95,17 @@ if (command === '/start' || command === '/help') {
   return reply({ chatId, source: 'USER_COMMAND', userName: fullName, directReplyMessage: helpReply });
 }
 
+function radarStatusLine() {
+  try {
+    const db = tsLoadRadarDb(fs);
+    const lots = Object.values(db.lots);
+    if (!lots.length) return '⚔️ Радар демпинга: база пуста (Radar Collector ещё не собирал данные)';
+    return '⚔️ Радар демпинга: <b>' + lots.length + '</b> лотов (' + lots.filter(l => l.dp !== null).length + ' с победителем), ' +
+      Object.keys(db.suppliers).length + ' участников, очередь ' + Object.keys(db.queue).length +
+      (db.updatedAt ? ', обновлено ' + new Date(db.updatedAt).toLocaleString('ru-RU', { timeZone: 'Asia/Almaty' }) : '');
+  } catch (e) { return '⚔️ Радар демпинга: ошибка чтения базы'; }
+}
+
 // 6. /status
 if (command === '/status') {
   const lock = tsReadLock(fs);
@@ -106,7 +118,8 @@ if (command === '/status') {
     directReplyMessage:
       '📊 <b>Статус TenderSniper</b>\n━━━━━━━━━━━━━━━━━━━━\n' + lockLine + '\n' +
       '📨 Отправлено лотов (реестр): <b>' + Object.keys(reg.sent).length + '</b>\n' +
-      '🔍 Проверено ИИ за ' + TS_CONFIG.CHECKED_TTL_DAYS + ' дн.: <b>' + Object.keys(reg.checked).length + '</b>'
+      '🔍 Проверено ИИ за ' + TS_CONFIG.CHECKED_TTL_DAYS + ' дн.: <b>' + Object.keys(reg.checked).length + '</b>\n' +
+      radarStatusLine()
   });
 }
 

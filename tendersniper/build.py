@@ -17,6 +17,7 @@ SRC = ROOT / "src"
 LIB = SRC / "lib"
 ORIGINAL = ROOT / "original" / "TenderSniper_Lite_Almaty.original.json"
 DIST = ROOT / "dist" / "TenderSniper_Lite_Almaty.json"
+RADAR_DIST = ROOT / "dist" / "TenderSniper_Radar_Collector.json"
 
 CODE_NODES = {
     "Auth & Command Router": "auth.js",
@@ -112,6 +113,52 @@ def main() -> None:
     DIST.parent.mkdir(parents=True, exist_ok=True)
     DIST.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"OK -> {DIST.relative_to(ROOT)} ({len(out['nodes'])} узлов)")
+    build_radar()
+
+
+def build_radar() -> None:
+    """Отдельный workflow сбора итогов закупок для радара демпинга."""
+    code = assemble("radar_collector.js")
+    syntax_check("Radar Collector", code)
+    wf = {
+        "name": "TenderSniper Radar Collector (Almaty)",
+        "nodes": [
+            {
+                "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "10 1-6 * * *"}]}},
+                "id": "6f1c2a1e-9b0e-4d7e-a1f1-5a2c0d7e0b01",
+                "name": "Schedule (01:10–06:10 Almaty)",
+                "type": "n8n-nodes-base.scheduleTrigger",
+                "typeVersion": 1.2,
+                "position": [0, 0],
+            },
+            {
+                "parameters": {},
+                "id": "6f1c2a1e-9b0e-4d7e-a1f1-5a2c0d7e0b02",
+                "name": "Manual Run",
+                "type": "n8n-nodes-base.manualTrigger",
+                "typeVersion": 1,
+                "position": [0, 200],
+            },
+            {
+                "parameters": {"jsCode": code},
+                "id": "6f1c2a1e-9b0e-4d7e-a1f1-5a2c0d7e0b03",
+                "name": "Radar Collector",
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [260, 100],
+                "alwaysOutputData": True,
+            },
+        ],
+        "connections": {
+            "Schedule (01:10–06:10 Almaty)": {"main": [[{"node": "Radar Collector", "type": "main", "index": 0}]]},
+            "Manual Run": {"main": [[{"node": "Radar Collector", "type": "main", "index": 0}]]},
+        },
+        "active": False,
+        "settings": {"executionOrder": "v1", "timezone": "Asia/Almaty"},
+        "tags": [],
+    }
+    RADAR_DIST.write_text(json.dumps(wf, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"OK -> {RADAR_DIST.relative_to(ROOT)} ({len(wf['nodes'])} узла)")
 
 
 if __name__ == "__main__":

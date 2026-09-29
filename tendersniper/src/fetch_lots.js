@@ -21,7 +21,7 @@ const startedAt = Date.now();
 
 const keywords = $input.all().map(i => i.json?.keyword).filter(Boolean);
 
-const BASE_FIELDS = 'id lotNumber nameRu descriptionRu amount count customerNameRu trdBuyNumberAnno indexDate refTradeMethodsId plnPointKatoList Files { id filePath originalName nameRu }';
+const BASE_FIELDS = 'id lotNumber nameRu descriptionRu amount count customerBin customerNameRu trdBuyNumberAnno indexDate refTradeMethodsId plnPointKatoList Files { id filePath originalName nameRu }';
 const QUERY_LEVELS = [
   { name: 'extended+paging', fields: BASE_FIELDS + ' trdBuyId TrdBuy { id endDate }', paging: true },
   { name: 'base+paging', fields: BASE_FIELDS, paging: true },

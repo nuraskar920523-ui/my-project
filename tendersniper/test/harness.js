@@ -7,8 +7,8 @@ const { EventEmitter } = require('events');
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
-function loadWorkflow() {
-  const p = path.join(__dirname, '..', 'dist', 'TenderSniper_Lite_Almaty.json');
+function loadWorkflow(file) {
+  const p = path.join(__dirname, '..', 'dist', file || 'TenderSniper_Lite_Almaty.json');
   return JSON.parse(fs.readFileSync(p, 'utf8'));
 }
 
@@ -44,7 +44,7 @@ function makeHttpsMock(router, log) {
 
 class Runner {
   constructor(opts) {
-    this.wf = loadWorkflow();
+    this.wf = loadWorkflow(opts.workflow);
     this.byName = Object.fromEntries(this.wf.nodes.map(n => [n.name, n]));
     this.outputs = {};
     this.env = opts.env || {};
