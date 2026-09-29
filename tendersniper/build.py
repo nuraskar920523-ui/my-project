@@ -104,11 +104,25 @@ def main() -> None:
             for link in branch:
                 assert link["node"] in names, f"связь в несуществующий узел {link['node']}"
 
+    # Сервер — ноутбук, включён примерно 20:00–23:00: сканирования в 20:20 и 22:20
+    # (между запусками Radar Collector в :10/:30/:50)
+    old_sched, new_sched = "Schedule (09:30 & 13:00 Almaty)", "Schedule (20:20 & 22:20 Almaty)"
+    for node in out["nodes"]:
+        if node["name"] == old_sched:
+            node["name"] = new_sched
+            node["parameters"] = {"rule": {"interval": [
+                {"field": "cronExpression", "expression": "20 20 * * *"},
+                {"field": "cronExpression", "expression": "20 22 * * *"},
+            ]}}
+    if old_sched in conns:
+        conns[new_sched] = conns.pop(old_sched)
+    out["name"] = "TenderSniper AI Radar Lite (Almaty Solo 20:20 & 22:20)"
+
     out["settings"] = dict(out.get("settings") or {})
     out["settings"]["timezone"] = "Asia/Almaty"
     # Устаревшие static data (старое имя расписания и lastScanTime, замененный файловой блокировкой)
     sd = out.get("staticData") or {}
-    out["staticData"] = {k: v for k, v in sd.items() if k.startswith("node:Schedule (09:30")} or None
+    out["staticData"] = None
 
     DIST.parent.mkdir(parents=True, exist_ok=True)
     DIST.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -124,9 +138,9 @@ def build_radar() -> None:
         "name": "TenderSniper Radar Collector (Almaty)",
         "nodes": [
             {
-                "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "10 1-6 * * *"}]}},
+                "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "10,30,50 20-22 * * *"}]}},
                 "id": "6f1c2a1e-9b0e-4d7e-a1f1-5a2c0d7e0b01",
-                "name": "Schedule (01:10–06:10 Almaty)",
+                "name": "Schedule (20:10–22:50 Almaty, каждые 20 мин)",
                 "type": "n8n-nodes-base.scheduleTrigger",
                 "typeVersion": 1.2,
                 "position": [0, 0],
@@ -150,7 +164,7 @@ def build_radar() -> None:
             },
         ],
         "connections": {
-            "Schedule (01:10–06:10 Almaty)": {"main": [[{"node": "Radar Collector", "type": "main", "index": 0}]]},
+            "Schedule (20:10–22:50 Almaty, каждые 20 мин)": {"main": [[{"node": "Radar Collector", "type": "main", "index": 0}]]},
             "Manual Run": {"main": [[{"node": "Radar Collector", "type": "main", "index": 0}]]},
         },
         "active": False,

@@ -204,14 +204,6 @@ function tokenize(text) {
 // ====================================================================
 // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ СЖАТИЯ ТЗ И ИЗВЛЕЧЕНИЯ ТТХ
 // ====================================================================
-function extractSpecs(fullNameStr) {
-  if (!fullNameStr) return '';
-  const parts = String(fullNameStr).split(',').map(p => p.trim()).filter(Boolean);
-  if (parts.length <= 2) return String(fullNameStr).substring(0, 120);
-  const specParts = parts.slice(2);
-  const specsStr = specParts.slice(0, 7).join(' | ');
-  return specsStr.length > 150 ? specsStr.substring(0, 147) + '...' : specsStr;
-}
 
 function compressLotText(text) {
   if (!text || text.length <= 400) return text || '';
@@ -382,6 +374,31 @@ function getIDF(tok) {
 console.log(`[PRE-FILTER V5.4] Индексировано: ${products.length} товаров (первичных: ${primaryIndices.length}, аксессуаров: ${accessoryIndices.length}), ${tokenIndex.size} уникальных токенов.` +
   (skippedUsdRows ? ` Пропущено строк в USD без курса USD_KZT_RATE: ${skippedUsdRows}.` : ''));
 
+// ---------- ПРОМПТЫ МАТРИЧНОЙ ПРОВЕРКИ (шаг 2; шаг 1 — структура ТЗ в Document Extraction) ----------
+const SPECS_MAX = 1500;
+const fullSpecs = (p) => { const t = String(p.fullName || p.name || ''); return t.length > SPECS_MAX ? t.substring(0, SPECS_MAX) + '…' : t; };
+function requirementsBlock(lot, fullLotText) {
+  if (Array.isArray(lot.structuredSpec) && lot.structuredSpec.length) {
+    return "СТРУКТУРИРОВАННЫЕ ТРЕБОВАНИЯ ТЗ ЛОТА (JSON):\n" + JSON.stringify(lot.structuredSpec, null, 1);
+  }
+  return "ТЕХНИЧЕСКАЯ СПЕЦИФИКАЦИЯ ЛОТА (текст — сначала выдели из него все требования):\n" + compressLotText(fullLotText);
+}
+const MATRIX_RULES =
+  "ПРАВИЛА МАТРИЧНОГО АУДИТА:\n" +
+  "1. Для КАЖДОГО требования ТЗ сформируй запись в массиве matrix (для выбранного кандидата; если ни один не подходит — для лучшего из них):\n" +
+  "   • parameter — название требования как в ТЗ; is_mandatory — обязательно ли оно по ТЗ;\n" +
+  "   • status: \"fulfilled\" — характеристики кандидата однозначно подтверждают требование; \"failed\" — кандидат НЕ соответствует " +
+  "(например: i3-10105F без встроенного видео при требовании iGPU; экран 16:9 вместо 16:10 WUXGA; картридж без чипа при требовании чипа; совместимый вместо оригинала; 8 портов вместо 24; нет SIM/NFC/IP68); " +
+  "\"no_data\" — в описании кандидата нет сведений. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО угадывать по памяти: нет в описании — только \"no_data\";\n" +
+  "   • proof — точная цитата из описания кандидата или факт несоответствия.\n\n";
+const SAFETY_RULES =
+  "СТОП-ПРАВИЛА (независимо от матрицы):\n" +
+  "А. Запрет подмены класса: МФУ ≠ принтер, планшетный ПК ≠ графический планшет, монитор ≠ кронштейн, ПК ≠ кабели.\n" +
+  "Б. VAD-бренды и письма производителя: если ТЗ требует Fortinet/Cisco/CheckPoint, MAF, авторизационное письмо или сертификат дистрибьютора — matchBadge: \"🔴 ТРЕБУЕТСЯ VAD\", rnuRisk: \"ВЫСОКИЙ РИСК РНУ\".\n" +
+  "В. Коррупционные маркеры (согласование по личному WhatsApp/телефону, образец до подписания договора) — matchBadge: \"🔴 РИСК РНУ\", rnuRisk: \"ВЫСОКИЙ РИСК РНУ: КОРРУПЦИОННАЯ ЗАТОЧКА\".\n" +
+  "Г. Конкретный бренд/модель без «или эквивалент»: если выбранный кандидат — именно этот бренд/модель, это НЕ препятствие (fulfilled, rnuRisk: \"НЕТ РИСКА\"); если другой — failed.\n" +
+  "Если стоп-правил нет — matchBadge не указывай (решение принимается по матрице).\n\n";
+
 // 2. ФИЛЬТРАЦИЯ ЛОТОВ ГОСЗАКУПОК
 const output = [];
 
@@ -459,7 +476,11 @@ for (const lot of recentLots) {
   if (lotTokens.length === 0) continue;
   const lotNameTokens = new Set(tokenize(lotNameOnly));
 
-  const isCartridgeOnlyLot = makeWordRegex('картридж[а-я]*|тонер[а-я]*|драм[а-я]*|чернил[а-я]*|фотобарабан[а-я]*|туба|термопленк[а-я]*').test(lotNameOnly);
+  // Лот только на расходники: в названии есть расходник и НЕТ самого устройства
+  // («МФУ и картриджи» — комплект; «Картридж для принтера HP» — расходник)
+  const lotNameDeviceCore = lotNameOnly.replace(/(?:для|к)[ \t]+(?:принтер|мфу|копир|плоттер|аппарат)[^,;]*/gi, ' ');
+  const isCartridgeOnlyLot = makeWordRegex('картридж[а-я]*|тонер[а-я]*|драм[а-я]*|чернил[а-я]*|фотобарабан[а-я]*|туба|термопленк[а-я]*').test(lotNameOnly) &&
+    !makeWordRegex('мфу|принтер[а-я]*|многофункциональн[а-я]*|копировальн[а-я]*[ \t]+аппарат[а-я]*').test(lotNameDeviceCore);
 
   const lotHasA3 = RE_A3.test(rawTitle);
   const lotHasMfpNegation = RE_MFP_NEGATION.test(classText);
@@ -632,7 +653,7 @@ for (const lot of recentLots) {
     const topPrimaryForAi = topPrimary.map(p => ({
       code: p.code,
       name: p.name,
-      specs: extractSpecs(p.fullName || p.name),
+      specs: fullSpecs(p),
       price: p.price,
       score: +p.score.toFixed(1)
     }));
@@ -640,7 +661,7 @@ for (const lot of recentLots) {
     const topAccessoryForAi = topAccessory.map(a => ({
       code: a.code,
       name: a.name,
-      specs: extractSpecs(a.fullName || a.name),
+      specs: fullSpecs(a),
       price: a.price,
       score: +a.score.toFixed(1)
     }));
@@ -650,22 +671,15 @@ for (const lot of recentLots) {
     if (!baseFin.isViable) continue;
 
     const geminiPrompt =
-      "Ты — старший юрист по госзакупкам РК и технический эксперт в ТОО «Os.corp Energy». Проведи аудит применимости КОМПЛЕКТА оборудования к лоту.\n\n" +
-      "ДАННЫЕ ЛОТА:\n" +
-      "- ID лота: " + lotDisplayNum + "\n" +
-      "- Наименование лота: " + lotNameOnly + "\n" +
-      "- Бюджет: " + lotBudget + " KZT, Количество: " + lotQty + " шт.\n" +
-      "- Техническая спецификация лота (сжато): " + compressLotText(fullLotText) + "\n\n" +
-      "КАНДИДАТЫ СО СКЛАДА (ОСНОВНОЕ ОБОРУДОВАНИЕ):\n" +
-      JSON.stringify(topPrimaryForAi, null, 2) + "\n\n" +
-      "КАНДИДАТЫ СО СКЛАДА (ДОПОЛНИТЕЛЬНЫЕ РАСХОДНИКИ / КОМПЛЕКТУЮЩИЕ):\n" +
-      JSON.stringify(topAccessoryForAi, null, 2) + "\n\n" +
-      "ПРАВИЛА АУДИТА:\n" +
-      "1. ПРОВЕРКА КОМПЛЕКТАЦИИ. Если ТЗ требует поставку основного устройства и расходников — кандидат обязан содержать обе позиции. Стартовый картридж, входящий в комплект устройства, отдельной позицией не считается.\n" +
-      "2. ЗАПРЕТ ПОДМЕНЫ ФУНКЦИОНАЛЬНОГО КЛАССА. Нельзя заменять МФУ на принтер или наоборот.\n" +
-      "3. ВЫБОР КОДОВ. selectedPrimaryCode и selectedAccessoryCodes — ТОЛЬКО коды из списков выше, символ в символ. Если подходящего кандидата нет — isCompatible: false.\n" +
-      "4. lotId — верни ID лота из данных выше без изменений.\n" +
-      "5. ФОРМАТ verdict. Дай короткое (1–3 предложения, до 300 символов) обоснование со ссылкой на пункт ТЗ.\n\n" +
+      "Ты — старший юрист по госзакупкам РК и главный технический эксперт ТОО «Os.corp Energy». Проверь применимость КОМПЛЕКТА со склада к лоту и заполни МАТРИЦУ СООТВЕТСТВИЯ.\n\n" +
+      "ДАННЫЕ ЛОТА:\n- ID лота: " + lotDisplayNum + "\n- Наименование: " + lotNameOnly + "\n- Бюджет: " + lotBudget + " KZT, Количество: " + lotQty + " шт.\n\n" +
+      requirementsBlock(lot, fullLotText) + "\n\n" +
+      "КАНДИДАТЫ СО СКЛАДА — ОСНОВНОЕ ОБОРУДОВАНИЕ (полные характеристики):\n" + JSON.stringify(topPrimaryForAi, null, 1) + "\n\n" +
+      "КАНДИДАТЫ СО СКЛАДА — РАСХОДНИКИ / КОМПЛЕКТУЮЩИЕ:\n" + JSON.stringify(topAccessoryForAi, null, 1) + "\n\n" +
+      MATRIX_RULES + SAFETY_RULES +
+      "КОМПЛЕКТАЦИЯ: если ТЗ требует и устройство, и расходники — матрица должна покрывать обе позиции. Стартовый картридж из комплекта устройства отдельной позицией не считается.\n" +
+      "ВЫБОР КОДОВ: selectedPrimaryCode и selectedAccessoryCodes — ТОЛЬКО коды из списков выше, символ в символ. lotId — ID лота без изменений.\n" +
+      "verdict — 1–3 предложения, до 300 символов.\n\n" +
       "Ответь строго по JSON-схеме, без пояснений вне JSON.";
 
     output.push({
@@ -692,6 +706,7 @@ for (const lot of recentLots) {
         citPayable: baseFin.citPayable,
         logisticsCost: baseFin.logisticsCost,
         geminiPrompt,
+        requirementsCount: Array.isArray(lot.structuredSpec) ? lot.structuredSpec.length : 0,
         ...lotMeta
       }
     });
@@ -834,32 +849,21 @@ for (const lot of recentLots) {
       distributor: c.distributor || 'Al-Style',
       code: c.code,
       name: c.name,
-      specs: extractSpecs(c.fullName || c.name),
+      specs: fullSpecs(c),
       price: c.price,
       score: +c.score.toFixed(1)
     }));
 
     const bestFin = topCandidates[0].fin;
-    const compressedLotSpec = compressLotText(fullLotText);
 
     const geminiPrompt =
-      "Ты — старший юрист по госзакупкам РК и технический эксперт в ТОО «Os.corp Energy». Твоя задача — провести строгий технико-юридический аудит соответствия кандидатов со склада технической спецификации лота.\n\n" +
-      "ДАННЫЕ ЛОТА:\n" +
-      "- ID лота: " + lotDisplayNum + "\n" +
-      "- Наименование лота: " + lotNameOnly + "\n" +
-      "- Бюджет: " + lotBudget + " KZT, Количество: " + lotQty + " шт.\n" +
-      "- Техническая спецификация лота (сжато): " + compressedLotSpec + "\n\n" +
-      "КАНДИДАТЫ СО СКЛАДА:\n" +
-      JSON.stringify(candidatePayload, null, 2) + "\n\n" +
-      "ПРАВИЛА АУДИТА:\n" +
-      "1. ЗАПРЕТ ПОДМЕНЫ ФУНКЦИОНАЛЬНОГО КЛАССА. МФУ (3-в-1: печать, сканирование, копирование) КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО заменять на однофункциональный принтер (только печать), и наоборот. Нельзя заменять монитор на кронштейн или мышь. Нельзя заменять ПК на кабельную фурнитуру.\n\n" +
-      "2. ФОРМАТ И ХАРАКТЕРИСТИКИ ПЕЧАТИ. Если лот требует формат А3 — принтер А4 недопустим. Если цветную печать — монохромный недопустим. Для картриджей и тонеров: строго проверять модель (CF259A, 59A и др.), ресурс и обязательное наличие чипа (если ТЗ требует чип, картриджи «Без чипа» КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ).\n\n" +
-      "3. ЗАПРЕТ ПОДМЕНЫ ПЛАНШЕТНОГО ПК ГРАФИЧЕСКИМ ПЕРОМ. Если в ТЗ лота требуется автономный планшетный компьютер с ОС — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО сопоставлять с графическими дигитайзерами без ОС.\n\n" +
-      "4. ПРОЕКТНЫЕ VAD-БРЕНДЫ. Если ТЗ требует Fortinet, Cisco, CheckPoint либо MAF/авторизационное письмо производителя — ставь isCompatible: false, matchBadge: \"🔴 ТРЕБУЕТСЯ VAD\", rnuRisk: \"ВЫСОКИЙ РИСК РНУ\".\n\n" +
-      "5. КОНКРЕТНЫЙ БРЕНД/МОДЕЛЬ В ТЗ. Если ТЗ называет бренд/модель без «или эквивалент»: (а) если выбранный кандидат — именно этот бренд/модель, это НЕ препятствие: isCompatible по ТТХ, rnuRisk: \"НЕТ РИСКА\", упомяни это в verdict; (б) если у кандидатов другой бренд — isCompatible: false, matchBadge: \"🔴 НЕ ПОДХОДИТ\". Спецификация ниже сжата: отсутствие фразы «или эквивалент» в сжатом тексте само по себе не доказывает заточку.\n\n" +
-      "6. КОРРУПЦИОННЫЕ МАРКЕРЫ. Требование согласования по личному WhatsApp/телефону, предоставления образца до подписания договора — rnuRisk: \"ВЫСОКИЙ РИСК РНУ: КОРРУПЦИОННАЯ ЗАТОЧКА\", isCompatible: false, matchBadge: \"🔴 РИСК РНУ\".\n\n" +
-      "7. ВЫБОР КОДА. selectedCode — ТОЛЬКО код из списка кандидатов, символ в символ. Если isCompatible: false — selectedCode: null. lotId — верни ID лота из данных выше без изменений.\n\n" +
-      "8. ФОРМАТ verdict. Дай короткое (1–3 предложения, до 300 символов) обоснование со ссылкой на пункт ТЗ.\n\n" +
+      "Ты — старший юрист по госзакупкам РК и главный технический эксперт ТОО «Os.corp Energy». Сопоставь кандидатов со склада с требованиями ТЗ лота и заполни МАТРИЦУ СООТВЕТСТВИЯ.\n\n" +
+      "ДАННЫЕ ЛОТА:\n- ID лота: " + lotDisplayNum + "\n- Наименование: " + lotNameOnly + "\n- Бюджет: " + lotBudget + " KZT, Количество: " + lotQty + " шт.\n\n" +
+      requirementsBlock(lot, fullLotText) + "\n\n" +
+      "КАНДИДАТЫ СО СКЛАДА (полные характеристики):\n" + JSON.stringify(candidatePayload, null, 1) + "\n\n" +
+      MATRIX_RULES + SAFETY_RULES +
+      "ВЫБОР КОДА: selectedCode — ТОЛЬКО код из списка кандидатов, символ в символ (кандидат, для которого заполнена матрица). lotId — ID лота без изменений.\n" +
+      "verdict — 1–3 предложения, до 300 символов.\n\n" +
       "Ответь строго по JSON-схеме, без пояснений вне JSON.";
 
     output.push({
@@ -885,6 +889,7 @@ for (const lot of recentLots) {
         citPayable: bestFin.citPayable,
         logisticsCost: bestFin.logisticsCost,
         geminiPrompt,
+        requirementsCount: Array.isArray(lot.structuredSpec) ? lot.structuredSpec.length : 0,
         ...lotMeta
       }
     });

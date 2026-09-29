@@ -12,6 +12,7 @@
 
 const GEMINI_API_KEY = tsGetEnv('GEMINI_API_KEY');
 const GEMINI_MODEL = tsGetEnv('GEMINI_MODEL', TS_CONFIG.GEMINI_MODEL_DEFAULT);
+const THINKING_LEVEL = tsGetEnv('GEMINI_THINKING_LEVEL', 'medium');
 const CONCURRENCY = 3;
 const NODE_DEADLINE_MS = 170000;   // новые лоты не начинаются после этого
 const HARD_DEADLINE_MS = 250000;   // никакой запрос/повтор не выходит за эту границу (лимит runner 300 c)
@@ -26,11 +27,24 @@ const RESPONSE_SCHEMA = {
     selectedPrimaryCode: { type: 'STRING', nullable: true },
     selectedAccessoryCodes: { type: 'ARRAY', items: { type: 'STRING' } },
     bundleSummary: { type: 'STRING', nullable: true },
-    matchBadge: { type: 'STRING', enum: ['🟢 ТОЧНОЕ СОВПАДЕНИЕ', '🔴 НЕ ПОДХОДИТ', '🔴 РИСК РНУ', '🔴 ТРЕБУЕТСЯ VAD'] },
-    rnuRisk: { type: 'STRING', enum: ['НЕТ РИСКА', 'ВЫСОКИЙ РИСК РНУ', 'ВЫСОКИЙ РИСК РНУ: КОРРУПЦИОННАЯ ЗАТОЧКА', 'ВЫСОКИЙ (ПРОЕКТНАЯ ЗАЩИТА)'] },
+    matrix: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          parameter: { type: 'STRING' },
+          status: { type: 'STRING', enum: ['fulfilled', 'failed', 'no_data'] },
+          proof: { type: 'STRING' },
+          is_mandatory: { type: 'BOOLEAN' }
+        },
+        required: ['parameter', 'status', 'proof', 'is_mandatory']
+      }
+    },
+    matchBadge: { type: 'STRING', nullable: true, enum: ['🟢 ТОЧНОЕ СОВПАДЕНИЕ', '🔴 НЕ ПОДХОДИТ', '🔴 РИСК РНУ', '🔴 ТРЕБУЕТСЯ VAD'] },
+    rnuRisk: { type: 'STRING', nullable: true, enum: ['НЕТ РИСКА', 'ВЫСОКИЙ РИСК РНУ', 'ВЫСОКИЙ РИСК РНУ: КОРРУПЦИОННАЯ ЗАТОЧКА', 'ВЫСОКИЙ (ПРОЕКТНАЯ ЗАЩИТА)'] },
     verdict: { type: 'STRING' }
   },
-  required: ['lotId', 'isCompatible', 'matchBadge', 'rnuRisk', 'verdict']
+  required: ['lotId', 'matrix', 'verdict']
 };
 
 const items = $input.all().map(i => Object.assign({}, i.json || {}));
@@ -42,7 +56,8 @@ async function inspect(d) {
   try {
     const data = await tsGeminiGenerate(GEMINI_API_KEY, GEMINI_MODEL, {
       contents: [{ parts: [{ text: d.geminiPrompt }] }],
-      generationConfig: { responseMimeType: 'application/json', responseSchema: RESPONSE_SCHEMA }
+      // Режим размышления для проверки ТЗ (как настроено на сервере); уровень — через GEMINI_THINKING_LEVEL
+      generationConfig: { responseMimeType: 'application/json', responseSchema: RESPONSE_SCHEMA, thinkingConfig: { thinkingLevel: THINKING_LEVEL } }
     }, 45000, startedAt + HARD_DEADLINE_MS);
     const text = tsGeminiText(data);
     if (!text) {

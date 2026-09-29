@@ -85,11 +85,45 @@ for (const d of items) {
       console.warn(`[PARSE WARN] Gemini вернул lotId "${parsed.lotId}" для лота ${d.lotId} — используется исходный лот (сопоставление 1:1).`);
     }
 
-    let isCompatible = !!parsed.isCompatible;
-    let matchBadge = parsed.matchBadge || (isCompatible ? '🟢 ТОЧНОЕ СОВПАДЕНИЕ' : '🔴 НЕ ПОДХОДИТ');
-    const rnuRisk = parsed.rnuRisk || (isCompatible ? 'НЕТ РИСКА' : 'ВЫСОКИЙ РИСК РНУ');
+    // Решение по МАТРИЦЕ принимает код, а не модель:
+    //   стоп-сигнал (VAD / РНУ) → отказ; есть failed → отказ; обязательный no_data → ручная проверка;
+    //   всё fulfilled → совпадение. Без матрицы (старый формат ответа) — прежняя логика по isCompatible.
+    const matrix = Array.isArray(parsed.matrix) ? parsed.matrix.filter(m => m && m.parameter) : [];
+    const failedItems = matrix.filter(m => m.status === 'failed');
+    const noDataMandatory = matrix.filter(m => m.status === 'no_data' && m.is_mandatory !== false);
+    const stopBadge = ['🔴 ТРЕБУЕТСЯ VAD', '🔴 РИСК РНУ'].includes(parsed.matchBadge) || /^ВЫСОКИЙ/.test(String(parsed.rnuRisk || ''));
+    const shortList = (arr, mark) => arr.slice(0, 6).map(m => mark + ' ' + String(m.parameter).substring(0, 60) + (m.proof ? ': ' + String(m.proof).substring(0, 80) : '')).join('; ') + (arr.length > 6 ? '; …' : '');
+
+    let isCompatible, matchBadge, rnuRisk;
     let aiVerdict = String(parsed.verdict || '').trim();
     let needsManualReview = false;
+    let matrixManual = false;
+    if (stopBadge) {
+      isCompatible = false;
+      matchBadge = parsed.matchBadge && parsed.matchBadge.startsWith('🔴') ? parsed.matchBadge : '🔴 РИСК РНУ';
+      rnuRisk = parsed.rnuRisk || 'ВЫСОКИЙ РИСК РНУ';
+    } else if (matrix.length && failedItems.length) {
+      isCompatible = false;
+      matchBadge = '🔴 НЕ ПОДХОДИТ';
+      rnuRisk = failedItems.some(f => /чип|прошивк|оригинал|maf|дистрибьютор|эквивалент/i.test(f.parameter + ' ' + (f.proof || ''))) ? 'ВЫСОКИЙ РИСК РНУ' : 'НЕТ РИСКА';
+      aiVerdict = `Не соответствует ТЗ по ${failedItems.length} из ${matrix.length} п.: ` + shortList(failedItems, '❌');
+    } else if (matrix.length && noDataMandatory.length) {
+      isCompatible = false;
+      matrixManual = true;
+      matchBadge = '🟡 ТРЕБУЕТ РУЧНОЙ ПРОВЕРКИ';
+      rnuRisk = 'ТРЕБУЕТСЯ УТОЧНЕНИЕ ПАСПОРТА';
+      aiVerdict = `Нет данных в каталоге по ${noDataMandatory.length} обязательным п. — сверьте паспорт товара: ` + shortList(noDataMandatory, '⚠️');
+    } else if (matrix.length) {
+      isCompatible = true;
+      matchBadge = '🟢 ТОЧНОЕ СОВПАДЕНИЕ';
+      rnuRisk = 'НЕТ РИСКА';
+      aiVerdict = `Все требования ТЗ подтверждены (${matrix.length}/${matrix.length}). ` + aiVerdict;
+    } else {
+      isCompatible = !!parsed.isCompatible;
+      matchBadge = parsed.matchBadge || (isCompatible ? '🟢 ТОЧНОЕ СОВПАДЕНИЕ' : '🔴 НЕ ПОДХОДИТ');
+      rnuRisk = parsed.rnuRisk || (isCompatible ? 'НЕТ РИСКА' : 'ВЫСОКИЙ РИСК РНУ');
+    }
+    const matrixStats = matrix.length ? { total: matrix.length, failed: failedItems.length, noData: noDataMandatory.length } : null;
 
     // 3. Выбор товара — только точное совпадение кода
     let chosenName = null, chosenCode = null, chosenDistributor = 'Al-Style', unitCost = 0;
@@ -126,7 +160,8 @@ for (const d of items) {
       }
     }
 
-    if (needsManualReview) {
+    if (matrixManual) needsManualReview = true;
+    if (needsManualReview && !matrixManual) {
       isCompatible = false;
       matchBadge = '🟡 ТРЕБУЕТ РУЧНОЙ ПРОВЕРКИ';
       aiVerdict = 'ИИ признал лот совместимым, но выбранный код (' + (parsed.selectedCode || parsed.selectedPrimaryCode || 'пусто') + ') не найден среди кандидатов. ' + aiVerdict;
@@ -140,7 +175,7 @@ for (const d of items) {
     register(d.lotId, needsManualReview ? 'manual' : (isCompatible ? 'compatible' : 'rejected'));
 
     results.push({ json: Object.assign(base, {
-      isCompatible, isVendorLocked: false, needsManualReview,
+      isCompatible, isVendorLocked: false, needsManualReview, matrixStats,
       matchBadge, rnuRisk, aiVerdict,
       targetBid: fin.targetBid,
       distributor: chosenDistributor,

@@ -53,7 +53,7 @@ const lot = (lotNumber, nameRu, descriptionRu, amount, count, extra) => Object.a
 
 const LOTS = [
   lot('L-NB', 'Ноутбук', 'Ноутбук 15.6", Intel Core i5, веб-камера HD, Windows 11', 700000, 2, { Files: [{ id: 1, filePath: 'https://goszakup.gov.kz/files/ts-nb.pdf', originalName: 'Техспецификация.pdf', nameRu: 'ТЗ' }] }),
-  lot('L-PC', 'Компьютер персональный', 'ОС Windows 11 Pro, SSD 512 ГБ, аккумулятор CMOS', 450000, 1),
+  lot('L-PC', 'Компьютер персональный', 'ОС Windows 11 Pro, SSD 512 ГБ, аккумулятор CMOS', 450000, 1, { Files: [{ id: 7, filePath: 'https://goszakup.gov.kz/files/ts-pc.pdf', originalName: 'ТЗ.pdf', nameRu: 'ТЗ' }] }),
   lot('L-UPS', 'Источник бесперебойного питания', 'ИБП 1000VA, аккумуляторная батарея 12В', 180000, 2),
   lot('L-RT', 'Маршрутизатор', 'Маршрутизатор Wi-Fi, режимы: роутер, точка доступа', 60000, 1),
   lot('L-MFP', 'МФУ лазерное', 'МФУ монохромное, цветной сенсорный дисплей, Цветность печати: черно-белая', 150000, 1),
@@ -68,12 +68,44 @@ const LOTS = [
   lot('L-LATE', 'Ноутбук', 'Ноутбук 14", срочно', 700000, 2, { TrdBuy: { id: 1, endDate: inHours(1) } }),
   lot('L-REJ', 'Принтер', 'Принтер лазерный цветной A4', 250000, 1),
   lot('L-BADCODE', 'Коммутатор 8 портов', 'Коммутатор 8 портов неуправляемый', 60000, 1),
+  lot('L-BUNDLE', 'МФУ и картриджи', 'МФУ монохромное A4 и картридж CF259A к нему', 200000, 1),
+  lot('L-NODATA', 'Проектор для актового зала', 'Проектор 4000 лм', 300000, 1),
+  lot('L-STOP', 'Монитор 27', 'Монитор 24 дюйма IPS', 280000, 3),
+  lot('L-DOCX', 'Ноутбук для бухгалтерии', 'Ноутбук 15.6', 700000, 2, { Files: [{ id: 9, filePath: 'https://goszakup.gov.kz/files/ts-docx.docx', originalName: 'Техническая спецификация.docx', nameRu: 'ТЗ' }] }),
   lot('L-PLAN', 'Монитор', 'Монитор 27 дюймов (пункт плана)', 400000, 2, { TrdBuy: null, trdBuyId: null, trdBuyNumberAnno: null })
 ];
 
+// ---------------- DOCX с data descriptor (размеры в локальном заголовке = 0) ----------------
+function buildDocx(paragraphs) {
+  const zlib = require('zlib');
+  const xml = '<?xml version="1.0"?><w:document><w:body>' + paragraphs.map(t => '<w:p><w:r><w:t>' + t.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</w:t></w:r></w:p>').join('') + '</w:body></w:document>';
+  const files = [['[Content_Types].xml', Buffer.from('<Types/>')], ['word/document.xml', Buffer.from(xml)]];
+  const locals = [], centrals = [];
+  let offset = 0;
+  for (const [name, raw] of files) {
+    const comp = zlib.deflateRawSync(raw);
+    const nameBuf = Buffer.from(name);
+    const lh = Buffer.alloc(30);
+    lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0x0008, 6); lh.writeUInt16LE(8, 8);
+    lh.writeUInt32LE(0, 14); lh.writeUInt32LE(0, 18); lh.writeUInt32LE(0, 22); lh.writeUInt16LE(nameBuf.length, 26); lh.writeUInt16LE(0, 28);
+    const dd = Buffer.alloc(16); dd.writeUInt32LE(0x08074b50, 0); dd.writeUInt32LE(0, 4); dd.writeUInt32LE(comp.length, 8); dd.writeUInt32LE(raw.length, 12);
+    const local = Buffer.concat([lh, nameBuf, comp, dd]);
+    const ch = Buffer.alloc(46);
+    ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(0x0008, 8); ch.writeUInt16LE(8, 10);
+    ch.writeUInt32LE(comp.length, 20); ch.writeUInt32LE(raw.length, 24); ch.writeUInt16LE(nameBuf.length, 28); ch.writeUInt32LE(offset, 42);
+    centrals.push(Buffer.concat([ch, nameBuf]));
+    locals.push(local); offset += local.length;
+  }
+  const cd = Buffer.concat(centrals);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(files.length, 8); eocd.writeUInt16LE(files.length, 10); eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, cd, eocd]);
+}
+const DOCX_BUF = buildDocx(['Техническая спецификация', 'Бұл құжат қазақ тілінде жазылған', 'Процессор / Процессор: Intel Core i5-1235U', 'Экран: 15.6", 16:9, 1920x1080', 'Оперативная память: не менее 8 ГБ']);
+
 // ---------------- Моки внешних API ----------------
 function makeRouter(scenario) {
-  const state = { gqlCalls: 0, geminiInspect: 0, geminiPdf: 0, pdfDownloads: 0, rateLimited: new Set() };
+  const state = { gqlCalls: 0, geminiInspect: 0, geminiPdf: 0, geminiSpec: 0, pdfDownloads: 0, docxDownloads: 0, rateLimited: new Set(), prompts: {}, specInputs: {} };
   const router = async (url, options, body) => {
     if (url.startsWith('https://ows.goszakup.gov.kz/v3/graphql')) {
       state.gqlCalls++;
@@ -93,6 +125,10 @@ function makeRouter(scenario) {
       }
       return { status: 200, body: { data: { Lots: hits } } };
     }
+    if (url.startsWith('https://goszakup.gov.kz/files/') && url.endsWith('.docx')) {
+      state.docxDownloads++;
+      return { status: 200, body: DOCX_BUF };
+    }
     if (url.startsWith('https://goszakup.gov.kz/files/')) {
       state.pdfDownloads++;
       return { status: 200, body: Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(2000, 32)]) };
@@ -106,19 +142,33 @@ function makeRouter(scenario) {
         state.geminiPdf++;
         return { status: 200, body: { candidates: [{ content: { parts: [{ text: 'Ноутбук: диагональ 15.6", процессор Intel Core i5, ОЗУ 8 ГБ, SSD 512 ГБ, веб-камера, Windows 11 или эквивалент' }] } }] } };
       }
-      state.geminiInspect++;
       const prompt = parts[0].text;
+      if (prompt.includes('ПОЛНЫЙ список технических и юридических требований')) {
+        state.geminiSpec++;
+        const title = (prompt.match(/ЛОТ: ([^\n]*)/) || [])[1];
+        state.specInputs[title] = prompt;
+        return { status: 200, body: { candidates: [{ content: { parts: [{ text: JSON.stringify({ requirements: [
+          { parameter: 'Процессор', condition: '=', value: 'Intel Core i5', is_mandatory: true, trap_category: 'cpu_cores_freq' },
+          { parameter: 'Оперативная память', condition: '>=', value: '8 ГБ', is_mandatory: true, trap_category: 'none' }
+        ] }) }] } }] } };
+      }
+      state.geminiInspect++;
       const lotId = (prompt.match(/- ID лота: (\S+)/) || [])[1];
+      state.prompts[lotId] = prompt;
       if (scenario.rateLimitOnce && lotId === 'L-RT' && !state.rateLimited.has(lotId)) {
         state.rateLimited.add(lotId);
         return { status: 429, body: { error: { message: 'Resource exhausted' } } };
       }
-      const m = prompt.match(/КАНДИДАТЫ СО СКЛАДА(?: \(ОСНОВНОЕ ОБОРУДОВАНИЕ\))?:\n(\[[\s\S]*?\n\])/);
-      const cands = m ? JSON.parse(m[1]) : [];
+      const lists = [...prompt.matchAll(/КАНДИДАТЫ СО СКЛАДА[^\n]*:\n(\[[\s\S]*?\n\])/g)].map(x => JSON.parse(x[1]));
+      const cands = lists[0] || [];
+      const accs = lists[1] || [];
+      const ok = [{ parameter: 'Функциональный класс', status: 'fulfilled', proof: 'по описанию', is_mandatory: true }];
       let verdict;
-      if (lotId === 'L-REJ') verdict = { lotId, isCompatible: false, selectedCode: null, matchBadge: '🔴 НЕ ПОДХОДИТ', rnuRisk: 'НЕТ РИСКА', verdict: 'Нет цветного принтера нужного класса.' };
-      else if (lotId === 'L-BADCODE') verdict = { lotId, isCompatible: true, selectedCode: 'НЕТ-ТАКОГО', matchBadge: '🟢 ТОЧНОЕ СОВПАДЕНИЕ', rnuRisk: 'НЕТ РИСКА', verdict: 'Подходит.' };
-      else verdict = { lotId, isCompatible: true, selectedCode: cands[0] && cands[0].code, selectedPrimaryCode: cands[0] && cands[0].code, selectedAccessoryCodes: [], matchBadge: '🟢 ТОЧНОЕ СОВПАДЕНИЕ', rnuRisk: 'НЕТ РИСКА', verdict: 'Соответствует п.1 ТЗ.' };
+      if (lotId === 'L-REJ') verdict = { lotId, selectedCode: null, matrix: [{ parameter: 'Цветная печать', status: 'failed', proof: 'кандидат монохромный', is_mandatory: true }], verdict: 'Нет цветного принтера.' };
+      else if (lotId === 'L-BADCODE') verdict = { lotId, selectedCode: 'НЕТ-ТАКОГО', matrix: ok, verdict: 'Подходит.' };
+      else if (lotId === 'L-NODATA') verdict = { lotId, selectedCode: cands[0] && cands[0].code, matrix: ok.concat([{ parameter: 'Световой поток 4000 лм', status: 'no_data', proof: 'в описании 3600 лм не указано как 4000', is_mandatory: true }]), verdict: 'Нет данных.' };
+      else if (lotId === 'L-STOP') verdict = { lotId, selectedCode: cands[0] && cands[0].code, matrix: ok, matchBadge: '🔴 ТРЕБУЕТСЯ VAD', rnuRisk: 'ВЫСОКИЙ РИСК РНУ', verdict: 'Требуется письмо производителя.' };
+      else verdict = { lotId, selectedCode: cands[0] && cands[0].code, selectedPrimaryCode: cands[0] && cands[0].code, selectedAccessoryCodes: accs[0] ? [accs[0].code] : [], matrix: ok, verdict: 'Соответствует п.1 ТЗ.' };
       return { status: 200, body: { candidates: [{ content: { parts: [{ text: 'thinking...', thought: true }, { text: JSON.stringify(verdict) }] } }] } };
     }
     return null;
@@ -171,6 +221,9 @@ async function test(name, fn) {
 
   // ---------- Сценарий 1: полный прогон ----------
   resetDisk();
+  const lotPC = LOTS.find(l => l.lotNumber === 'L-PC');
+  fs.mkdirSync(path.join(N8N_DIR, 'doc_cache'), { recursive: true });
+  fs.writeFileSync(path.join(N8N_DIR, 'doc_cache', lotPC.id + '_7.txt'), 'Процессор: Intel Core i5, ОЗУ 16 ГБ, SSD 512 ГБ (текст из старого кэша без структуры)');
   const m1 = makeRouter({});
   const r1 = new Runner({ env: ENV, router: m1.router, execId: 'exec-1' });
   const p1 = await runPipeline(r1, CRON);
@@ -182,7 +235,7 @@ async function test(name, fn) {
     const nb = p1.fetched.find(f => f.json.keyword === 'ноутбук').json;
     assert.ok(nb.pages >= 2, 'pages=' + nb.pages);
   });
-  for (const [id, code] of [['L-NB', 'NB-001'], ['L-PC', 'PC-I5'], ['L-UPS', 'UPS-1000'], ['L-RT', 'RT-KN'], ['L-MFP', 'MFP-141'], ['L-POE', 'SW-POE'], ['L-MON', 'MON-24'], ['L-PRJ', 'PRJ-X06'], ['L-CAM', 'CAM-C270']]) {
+  for (const [id, code] of [['L-DOCX', 'NB-001'], ['L-NB', 'NB-001'], ['L-PC', 'PC-I5'], ['L-UPS', 'UPS-1000'], ['L-RT', 'RT-KN'], ['L-MFP', 'MFP-141'], ['L-POE', 'SW-POE'], ['L-MON', 'MON-24'], ['L-PRJ', 'PRJ-X06'], ['L-CAM', 'CAM-C270']]) {
     await test(`Лот ${id} попал в дайджест с товаром ${code}`, () => {
       assert.ok(rowIds.includes(id), 'нет в выгрузке; parsed=' + JSON.stringify(parsedById[id] && { c: parsedById[id].productCode, m: parsedById[id].marginPercent, b: parsedById[id].matchBadge }));
       const row = p1.rows.find(x => x.json['Номер_Лота'] === id).json;
@@ -194,11 +247,38 @@ async function test(name, fn) {
   await test('Мебель отсеяна', () => assert.ok(!parsedById['L-FURN']));
   await test('Лот без объявления (TrdBuy: null, пункт плана) отсеян', () => assert.ok(!parsedById['L-PLAN'] && !rowIds.includes('L-PLAN')));
   await test('Лот с дедлайном через 1 ч отсеян', () => assert.ok(!parsedById['L-LATE'] && p1.merged[0].json.skippedDeadline === 1));
-  await test('Отклонённый ИИ лот не в выгрузке, посчитан как отклонённый', () => { assert.ok(!rowIds.includes('L-REJ')); assert.ok(/Отклонено ИИ: 1/.test(digestText)); });
+  await test('Матрица: failed → отказ с причиной; стоп-сигнал VAD сильнее «всё выполнено»', () => {
+    assert.ok(!rowIds.includes('L-REJ') && !rowIds.includes('L-STOP'));
+    assert.ok(parsedById['L-REJ'].aiVerdict.includes('❌ Цветная печать'), parsedById['L-REJ'].aiVerdict);
+    assert.strictEqual(parsedById['L-STOP'].matchBadge, '🔴 ТРЕБУЕТСЯ VAD');
+    assert.ok(/Отклонено ИИ: 2/.test(digestText));
+  });
+  await test('Матрица: обязательный no_data → 🟡 ручная проверка, не совпадение', () => {
+    assert.strictEqual(parsedById['L-NODATA'].needsManualReview, true);
+    assert.ok(!rowIds.includes('L-NODATA'));
+  });
+  await test('Комплект (МФУ + картридж) не роняет Pre-Filter и попадает в выгрузку', () => {
+    const pre = p1.pre.find(x => x.json.lotId === 'L-BUNDLE');
+    assert.ok(pre && pre.json.isBundle, 'комплект не собран');
+    const row = p1.rows.find(x => x.json['Номер_Лота'] === 'L-BUNDLE');
+    assert.ok(row, 'нет в выгрузке'); assert.strictEqual(row.json['Код'], 'MFP-141+CRT-59A');
+  });
+  await test('DOCX с data descriptor: текст извлечён без Gemini, казахская строка убрана, двуязычная сохранена', () => {
+    assert.strictEqual(m1.state.docxDownloads, 1);
+    const inp = m1.state.specInputs['Ноутбук для бухгалтерии'] || '';
+    assert.ok(inp.includes('Процессор / Процессор: Intel Core i5-1235U'), inp.slice(-300));
+    assert.ok(!inp.includes('қазақ тілінде'));
+    assert.ok(m1.state.prompts['L-DOCX'].includes('СТРУКТУРИРОВАННЫЕ ТРЕБОВАНИЯ ТЗ ЛОТА'));
+  });
+  await test('Старый кэш текста без структуры → структура ТЗ достроена и ушла в промпт', () => {
+    assert.ok(m1.state.specInputs['Компьютер персональный'], 'структура не достроена');
+    assert.ok(m1.state.prompts['L-PC'].includes('СТРУКТУРИРОВАННЫЕ ТРЕБОВАНИЯ ТЗ ЛОТА'));
+    assert.ok(fs.existsSync(path.join(N8N_DIR, 'doc_cache', lotPC.id + '_spec.json')));
+  });
   await test('Неизвестный код от ИИ → «ручная проверка», а не первый кандидат', () => {
     assert.strictEqual(parsedById['L-BADCODE'].needsManualReview, true);
     assert.ok(!rowIds.includes('L-BADCODE'));
-    assert.ok(digestText.includes('Требуют ручной проверки: 1'));
+    assert.ok(digestText.includes('Требуют ручной проверки: 2'));
   });
   await test('USD-строка каталога без курса пропущена', () => assert.ok(r1.logs.some(l => /USD без курса USD_KZT_RATE: 1/.test(l[2]))));
   await test('Дайджест один (узел Build Digest выполнен 1 раз), сообщения ≤ 4096 символов', () => {
@@ -218,7 +298,7 @@ async function test(name, fn) {
     assert.ok(!dump.includes('test-gz-token') && !dump.includes('test-gemini-key'));
     assert.ok(!JSON.stringify(r1.outputs['Gemini AI Инспектор']).includes('geminiPrompt'), 'промпты не должны тянуться дальше узла Gemini');
   });
-  await test('Ключ Gemini передан в заголовке; PDF скачан 1 раз', () => { assert.strictEqual(m1.state.pdfDownloads, 1); assert.strictEqual(m1.state.geminiPdf, 1); });
+  await test('Ключ Gemini в заголовке; PDF скачан 1 раз (кэш не качается повторно)', () => { assert.strictEqual(m1.state.pdfDownloads, 1); assert.strictEqual(m1.state.geminiPdf, 1); });
   await test('Блокировка снята после дайджеста', () => assert.ok(!fs.existsSync(path.join(N8N_DIR, 'tendersniper_scan.lock'))));
 
   // ---------- Сценарий 2: повторный запуск — дедуп по реестру, Gemini не вызывается ----------
@@ -229,6 +309,7 @@ async function test(name, fn) {
     assert.strictEqual(p2.rows.length, 0);
     assert.strictEqual(m2.state.geminiInspect, 0, 'geminiInspect=' + m2.state.geminiInspect);
     assert.strictEqual(m2.state.geminiPdf, 0);
+    assert.strictEqual(m2.state.geminiSpec, 0);
   });
 
   // ---------- Сценарий 3: API не знает TrdBuy/after — откат на исходный запрос ----------

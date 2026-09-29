@@ -272,7 +272,7 @@ if (verifiedBullets.length > 0) {
         '📍 <b>Регион:</b> г. Алматы (КАТО 75*)\n\n' +
         '❌ <b>Сбой соединения с порталом Госзакупок (ЦЭФ GraphQL API)!</b>\n\n' +
         'Все запросы завершились ошибкой авторизации или сетевым тайм-аутом. Проверьте актуальность <code>GOSZAKUP_TOKEN</code> в переменных окружения n8n.\n\n' +
-        '<i>Следующая автоматическая попытка: 09:30 или 13:00 (Asia/Almaty).</i>',
+        '<i>Следующая автоматическая попытка: ' + TS_CONFIG.SCAN_TIMES_TEXT + ' (Asia/Almaty).</i>',
       chunkIndex: 0,
       isFirstChunk: true
     });
@@ -282,7 +282,7 @@ if (verifiedBullets.length > 0) {
         '🍎 <b>TENDERSNIPER LITE — АЛМАТЫ СОЛО</b>\n━━━━━━━━━━━━━━━━━━━━\n' +
         '📍 <b>Регион:</b> г. Алматы (КАТО 75*) | Способы: ЗЦП, ОИ, ОК\n\n' +
         'За текущий цикл подходящих лотов по Алматы (' + CRITERIA_TEXT + ', 🟢 точное совпадение) не найдено.' + statsBlock + '\n\n' +
-        '<i>Следующая проверка: 09:30 или 13:00 (Asia/Almaty).</i>',
+        '<i>Следующая проверка: ' + TS_CONFIG.SCAN_TIMES_TEXT + ' (Asia/Almaty).</i>',
       chunkIndex: 0,
       isFirstChunk: true
     });
