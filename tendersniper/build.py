@@ -104,19 +104,20 @@ def main() -> None:
             for link in branch:
                 assert link["node"] in names, f"связь в несуществующий узел {link['node']}"
 
-    # Сервер — ноутбук, включён примерно 20:00–23:00: сканирования в 20:20 и 22:20
-    # (между запусками Radar Collector в :10/:30/:50)
-    old_sched, new_sched = "Schedule (09:30 & 13:00 Almaty)", "Schedule (20:20 & 22:20 Almaty)"
+    # Сервер — ноутбук: включён ~09:00–17:00 (работа) и ~20:00–23:00 (дом).
+    # Сканирования 09:30, 13:00 и 20:20 (вечернее — между запусками Radar Collector в :10/:30/:50)
+    old_sched, new_sched = "Schedule (09:30 & 13:00 Almaty)", "Schedule (09:30, 13:00, 20:20 Almaty)"
     for node in out["nodes"]:
         if node["name"] == old_sched:
             node["name"] = new_sched
             node["parameters"] = {"rule": {"interval": [
+                {"field": "cronExpression", "expression": "30 9 * * *"},
+                {"field": "cronExpression", "expression": "0 13 * * *"},
                 {"field": "cronExpression", "expression": "20 20 * * *"},
-                {"field": "cronExpression", "expression": "20 22 * * *"},
             ]}}
     if old_sched in conns:
         conns[new_sched] = conns.pop(old_sched)
-    out["name"] = "TenderSniper AI Radar Lite (Almaty Solo 20:20 & 22:20)"
+    out["name"] = "TenderSniper AI Radar Lite (Almaty Solo 09:30, 13:00, 20:20)"
 
     out["settings"] = dict(out.get("settings") or {})
     out["settings"]["timezone"] = "Asia/Almaty"
