@@ -114,7 +114,8 @@ function makeRouter(scenario) {
       if (scenario.rejectExtended && q.query.includes('TrdBuy')) return { status: 400, body: { errors: [{ message: 'Cannot query field "TrdBuy" on type "Lots".' }] } };
       if (scenario.rejectPaging && q.query.includes('$after')) return { status: 400, body: { errors: [{ message: 'Unknown argument "after"' }] } };
       const kw = String(q.variables.nameRu).toLowerCase();
-      let hits = LOTS.filter(l => l.nameRu.toLowerCase().includes(kw));
+      // Фильтр API считается чувствительным к регистру (худший случай): бот обязан искать варианты «Ноутбук», «МФУ»
+      let hits = LOTS.filter(l => l.nameRu.includes(q.variables.nameRu));
       if (!q.query.includes('TrdBuy')) hits = hits.map(l => { const c = Object.assign({}, l); delete c.TrdBuy; delete c.trdBuyId; return c; });
       // Пагинация для «ноутбук»: по одному лоту на страницу
       if (q.query.includes('$after') && kw === 'ноутбук') {
@@ -232,7 +233,7 @@ async function test(name, fn) {
   const parsedById = Object.fromEntries(p1.parsed.map(p => [p.json.lotId, p.json]));
 
   await test('Пагинация: оба лота «ноутбук» со второй страницы получены', () => {
-    const nb = p1.fetched.find(f => f.json.keyword === 'ноутбук').json;
+    const nb = p1.fetched.find(f => f.json.keyword === 'Ноутбук').json;
     assert.ok(nb.pages >= 2, 'pages=' + nb.pages);
   });
   for (const [id, code] of [['L-DOCX', 'NB-001'], ['L-NB', 'NB-001'], ['L-PC', 'PC-I5'], ['L-UPS', 'UPS-1000'], ['L-RT', 'RT-KN'], ['L-MFP', 'MFP-141'], ['L-POE', 'SW-POE'], ['L-MON', 'MON-24'], ['L-PRJ', 'PRJ-X06'], ['L-CAM', 'CAM-C270']]) {
@@ -245,6 +246,14 @@ async function test(name, fn) {
   await test('Гео: лот с КАТО области (заказчик «г. Алматы») отсеян', () => assert.ok(!rowIds.includes('L-REGION') && !parsedById['L-REGION']));
   await test('Вендор-лок Cisco не в выгрузке, но посчитан в сводке', () => { assert.ok(!rowIds.includes('L-VAD')); assert.ok(/вендор-локам[^:]*: 1/.test(digestText)); });
   await test('Мебель отсеяна', () => assert.ok(!parsedById['L-FURN']));
+  await test('Поиск с заглавной/капсом: лоты «Ноутбук», «МФУ …» найдены при регистрозависимом API', () => {
+    assert.ok(r1.logs.some(l => /найдено ТОЛЬКО с заглавной\/капсом: [1-9]/.test(l[2])), 'нет диагностики регистра');
+    assert.ok(rowIds.includes('L-MFP') && rowIds.includes('L-NB'));
+  });
+  await test('Воронка отбора в логе и в дайджесте', () => {
+    assert.ok(r1.logs.some(l => l[2].startsWith('[PRE-FILTER FUNNEL]')));
+    assert.ok(/🔬 Воронка: лотов Алматы <b>\d+<\/b>/.test(digestText), digestText.slice(-600));
+  });
   await test('Лот без объявления (TrdBuy: null, пункт плана) отсеян', () => assert.ok(!parsedById['L-PLAN'] && !rowIds.includes('L-PLAN')));
   await test('Лот с дедлайном через 1 ч отсеян', () => assert.ok(!parsedById['L-LATE'] && p1.merged[0].json.skippedDeadline === 1));
   await test('Матрица: failed → отказ с причиной; стоп-сигнал VAD сильнее «всё выполнено»', () => {

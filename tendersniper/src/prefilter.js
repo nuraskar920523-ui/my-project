@@ -402,13 +402,16 @@ const SAFETY_RULES =
 // 2. ФИЛЬТРАЦИЯ ЛОТОВ ГОСЗАКУПОК
 const output = [];
 
+// Воронка: где и сколько лотов отсеяно (выводится в лог и в дайджест)
+const funnel = { almaty: recentLots.length, known: 0, docPending: 0, budget: 0, nonIt: 0, locked: 0, noCatalogMatch: 0, noCategoryMatch: 0, notProfitable: 0, toAi: 0 };
+
 for (const lot of recentLots) {
   const lotDisplayNum = String(lot.lotNumber || lot.trdBuyNumberAnno || lot.id || '');
   if (!lotDisplayNum) continue;
   const lotKeys = [lotDisplayNum].concat(tsLotKeys(lot));
-  if (lotKeys.some(k => sentLotIds.has(k)) || tsIsKnownLot(registry, lotKeys)) continue;
+  if (lotKeys.some(k => sentLotIds.has(k)) || tsIsKnownLot(registry, lotKeys)) { funnel.known++; continue; }
   // ТЗ ещё не прочитано (очередь Document Extraction) — проверим в следующем цикле
-  if (lot.docPending) { skippedDocPending++; continue; }
+  if (lot.docPending) { skippedDocPending++; funnel.docPending++; continue; }
 
   const lotBudget = parseFloat(lot.amount) || 0;
   const lotQty = parseInt(lot.count) || 1;
@@ -422,16 +425,16 @@ for (const lot of recentLots) {
   // rawTitle — плюс ТТХ из PDF: для поиска кандидатов и требований (A3, PoE, цветность)
   const classText = (lotNameOnly + ' ' + lotDescOnly).trim();
   const rawTitle = (classText + (lotDocSpec ? ' ' + lotDocSpec : '')).trim();
-  if (lotBudget < TS_CONFIG.MIN_LOT_BUDGET || lotBudget > TS_CONFIG.MAX_LOT_BUDGET || !rawTitle) continue;
+  if (lotBudget < TS_CONFIG.MIN_LOT_BUDGET || lotBudget > TS_CONFIG.MAX_LOT_BUDGET || !rawTitle) { funnel.budget++; continue; }
 
   // ХАРД-ЛОК: Отсечение заведомо не-ИТ закупок (по названию и описанию портала, не по PDF)
-  if (tsIsNonItText(lotNameOnly) || tsIsNonItText(lotDescOnly)) continue;
+  if (tsIsNonItText(lotNameOnly) || tsIsNonItText(lotDescOnly)) { funnel.nonIt++; continue; }
 
   // ПОЗИТИВНАЯ ПРОВЕРКА ДЛЯ СЛОВА "ГАРНИТУР":
   if (/гарнитур[а-я]*/i.test(classText)) {
     const hasFurniture = RE_FURNITURE.test(classText);
     const hasPositiveHeadset = RE_HEADSET_POSITIVE.test(rawTitle);
-    if (hasFurniture || !hasPositiveHeadset) continue;
+    if (hasFurniture || !hasPositiveHeadset) { funnel.nonIt++; continue; }
   }
 
   const directUrl = lot.trdBuyId
@@ -469,11 +472,11 @@ for (const lot of recentLots) {
       break;
     }
   }
-  if (isLocked) continue;
+  if (isLocked) { funnel.locked++; continue; }
 
   // ШАГ 2: RETRIEVAL - токены лота строятся из названия, описания и ТТХ файла (без служебных заголовков)
   const lotTokens = tokenize(rawTitle);
-  if (lotTokens.length === 0) continue;
+  if (lotTokens.length === 0) { funnel.noCatalogMatch++; continue; }
   const lotNameTokens = new Set(tokenize(lotNameOnly));
 
   // Лот только на расходники: в названии есть расходник и НЕТ самого устройства
@@ -581,7 +584,7 @@ for (const lot of recentLots) {
     }
   }
 
-  if (candidateHits.size === 0) continue;
+  if (candidateHits.size === 0) { funnel.noCatalogMatch++; continue; }
 
   if (isBundle) {
     const primaryScored = [];
@@ -645,7 +648,7 @@ for (const lot of recentLots) {
       }
     }
 
-    if (primaryScored.length === 0) continue;
+    if (primaryScored.length === 0) { funnel.noCategoryMatch++; continue; }
     primaryScored.sort((a, b) => b.score - a.score);
     accessoryScored.sort((a, b) => b.score - a.score);
 
@@ -668,7 +671,7 @@ for (const lot of recentLots) {
     const primaryCost = topPrimary[0].price;
     const accessoryCost = topAccessory.length > 0 ? topAccessory[0].price : 0;
     const baseFin = evaluateFinancials(lotBudget, primaryCost + accessoryCost, lotQty, topPrimary[0].name);
-    if (!baseFin.isViable) continue;
+    if (!baseFin.isViable) { funnel.notProfitable++; continue; }
 
     const geminiPrompt =
       "Ты — старший юрист по госзакупкам РК и главный технический эксперт ТОО «Os.corp Energy». Проверь применимость КОМПЛЕКТА со склада к лоту и заполни МАТРИЦУ СООТВЕТСТВИЯ.\n\n" +
@@ -713,6 +716,7 @@ for (const lot of recentLots) {
 
   } else {
     const scored = [];
+    let categoryMatched = 0;
 
     for (const [pIdx, hits] of candidateHits.entries()) {
       const idfScore = candidateScores.get(pIdx) || 0;
@@ -802,6 +806,7 @@ for (const lot of recentLots) {
         if (lotNameTokens.has(t)) titleHits++;
       }
 
+      categoryMatched++;
       const fin = evaluateFinancials(lotBudget, prod.price, lotQty, prod.name);
       if (!fin.isViable) continue;
 
@@ -841,7 +846,7 @@ for (const lot of recentLots) {
       });
     }
 
-    if (scored.length === 0) continue;
+    if (scored.length === 0) { if (categoryMatched) funnel.notProfitable++; else funnel.noCategoryMatch++; continue; }
     scored.sort((a, b) => b.score !== a.score ? (b.score - a.score) : (b.price - a.price));
 
     const topCandidates = scored.slice(0, 5);
@@ -922,15 +927,19 @@ while (selectedLots.length < TOTAL_LOTS_LIMIT && overflowLots.length > 0) {
 }
 
 const deferredLots = overflowLots.length;
+funnel.toAi = selectedLots.filter(l => !l.json.isVendorLocked).length;
+funnel.deferred = deferredLots;
+console.log('[PRE-FILTER FUNNEL] ' + JSON.stringify(funnel));
 console.log(`[PRE-FILTER] Кандидатов для ИИ: ${selectedLots.filter(l => !l.json.isVendorLocked).length} | Вендор-локов: ${selectedLots.filter(l => l.json.isVendorLocked).length} | ` +
   `Отложено до след. цикла: ${deferredLots} | Ждут чтения ТЗ: ${skippedDocPending}`);
 
 if (selectedLots.length === 0) {
-  return [{ json: { empty: true, chatId, deferredLots, skippedDocPending } }];
+  return [{ json: { empty: true, chatId, deferredLots, skippedDocPending, funnel } }];
 }
 if (deferredLots || skippedDocPending) {
   selectedLots[0].json.deferredLots = deferredLots;
   selectedLots[0].json.skippedDocPending = skippedDocPending;
 }
+selectedLots[0].json.funnel = funnel;
 
 return selectedLots;

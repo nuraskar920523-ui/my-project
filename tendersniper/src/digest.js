@@ -188,6 +188,17 @@ if (lockedCount) statLines.push('⛔ Отсеяно по вендор-локам
 if (rejectedCount || belowCount) statLines.push('🔍 Отклонено ИИ: ' + rejectedCount + ' | Ниже порога маржи: ' + belowCount);
 if (preMeta.deferredLots) statLines.push('⏭ Отложено до следующего цикла (лимит 30 лотов): ' + preMeta.deferredLots);
 if (preMeta.skippedDocPending) statLines.push('📄 Ждут чтения ТЗ: ' + preMeta.skippedDocPending);
+// Воронка отбора: где теряются лоты (диагностика «почему мало»)
+const fn = preMeta.funnel;
+if (fn && fn.almaty !== undefined) {
+  const fresh = fn.almaty - fn.known - fn.docPending;
+  const matched = fresh - fn.budget - fn.nonIt - fn.locked - fn.noCatalogMatch - fn.noCategoryMatch;
+  statLines.push('🔬 Воронка: лотов Алматы <b>' + fn.almaty + '</b> → новых ' + fresh + ' → с товаром в каталоге ' + matched +
+    ' → прибыльных ' + (matched - fn.notProfitable) + ' → на проверку ИИ <b>' + fn.toAi + '</b>');
+  statLines.push('   <i>отсеяно: уже проверены ' + fn.known + ', не-ИТ ' + fn.nonIt + ', нет в каталоге ' + fn.noCatalogMatch +
+    ', не та категория ' + fn.noCategoryMatch + ', убыточно при −' + Math.round(TS_CONFIG.BID_DISCOUNT * 100) + '% ' + fn.notProfitable +
+    (fn.locked ? ', вендор-лок ' + fn.locked : '') + (fn.budget ? ', бюджет ' + fn.budget : '') + '</i>');
+}
 if (mergeMeta.errorCount && !mergeMeta.apiFailure) statLines.push('⚠️ Ошибки ЦЭФ API: ' + mergeMeta.errorCount + ' из ' + (mergeMeta.keywordCount || '?') + ' запросов');
 const statsBlock = statLines.length ? '\n\n' + statLines.join('\n') : '';
 
