@@ -72,6 +72,7 @@ const LOTS = [
   lot('L-NODATA', 'Проектор для актового зала', 'Проектор 4000 лм', 300000, 1),
   lot('L-STOP', 'Монитор 27', 'Монитор 24 дюйма IPS', 280000, 3),
   lot('L-DOCX', 'Ноутбук для бухгалтерии', 'Ноутбук 15.6', 700000, 2, { Files: [{ id: 9, filePath: 'https://goszakup.gov.kz/files/ts-docx.docx', originalName: 'Техническая спецификация.docx', nameRu: 'ТЗ' }] }),
+  lot('L-CHEAP', 'Монитор дешёвый', 'Монитор 24 дюйма', 50000, 1),
   lot('L-PLAN', 'Монитор', 'Монитор 27 дюймов (пункт плана)', 400000, 2, { TrdBuy: null, trdBuyId: null, trdBuyNumberAnno: null })
 ];
 
@@ -114,8 +115,7 @@ function makeRouter(scenario) {
       if (scenario.rejectExtended && q.query.includes('TrdBuy')) return { status: 400, body: { errors: [{ message: 'Cannot query field "TrdBuy" on type "Lots".' }] } };
       if (scenario.rejectPaging && q.query.includes('$after')) return { status: 400, body: { errors: [{ message: 'Unknown argument "after"' }] } };
       const kw = String(q.variables.nameRu).toLowerCase();
-      // Фильтр API считается чувствительным к регистру (худший случай): бот обязан искать варианты «Ноутбук», «МФУ»
-      let hits = LOTS.filter(l => l.nameRu.includes(q.variables.nameRu));
+      let hits = LOTS.filter(l => l.nameRu.toLowerCase().includes(kw));
       if (!q.query.includes('TrdBuy')) hits = hits.map(l => { const c = Object.assign({}, l); delete c.TrdBuy; delete c.trdBuyId; return c; });
       // Пагинация для «ноутбук»: по одному лоту на страницу
       if (q.query.includes('$after') && kw === 'ноутбук') {
@@ -233,7 +233,7 @@ async function test(name, fn) {
   const parsedById = Object.fromEntries(p1.parsed.map(p => [p.json.lotId, p.json]));
 
   await test('Пагинация: оба лота «ноутбук» со второй страницы получены', () => {
-    const nb = p1.fetched.find(f => f.json.keyword === 'Ноутбук').json;
+    const nb = p1.fetched.find(f => f.json.keyword === 'ноутбук').json;
     assert.ok(nb.pages >= 2, 'pages=' + nb.pages);
   });
   for (const [id, code] of [['L-DOCX', 'NB-001'], ['L-NB', 'NB-001'], ['L-PC', 'PC-I5'], ['L-UPS', 'UPS-1000'], ['L-RT', 'RT-KN'], ['L-MFP', 'MFP-141'], ['L-POE', 'SW-POE'], ['L-MON', 'MON-24'], ['L-PRJ', 'PRJ-X06'], ['L-CAM', 'CAM-C270']]) {
@@ -246,9 +246,9 @@ async function test(name, fn) {
   await test('Гео: лот с КАТО области (заказчик «г. Алматы») отсеян', () => assert.ok(!rowIds.includes('L-REGION') && !parsedById['L-REGION']));
   await test('Вендор-лок Cisco не в выгрузке, но посчитан в сводке', () => { assert.ok(!rowIds.includes('L-VAD')); assert.ok(/вендор-локам[^:]*: 1/.test(digestText)); });
   await test('Мебель отсеяна', () => assert.ok(!parsedById['L-FURN']));
-  await test('Поиск с заглавной/капсом: лоты «Ноутбук», «МФУ …» найдены при регистрозависимом API', () => {
-    assert.ok(r1.logs.some(l => /найдено ТОЛЬКО с заглавной\/капсом: [1-9]/.test(l[2])), 'нет диагностики регистра');
-    assert.ok(rowIds.includes('L-MFP') && rowIds.includes('L-NB'));
+  await test('Убыточный лот показан с причиной: бюджет/шт → закупка/шт', () => {
+    assert.ok(digestText.includes('💸'), digestText.slice(-900));
+    assert.ok(/Монитор дешёвый ×1: 50\s000 ₸ → 60\s000 ₸/.test(digestText), digestText.slice(-900));
   });
   await test('Воронка отбора в логе и в дайджесте', () => {
     assert.ok(r1.logs.some(l => l[2].startsWith('[PRE-FILTER FUNNEL]')));
@@ -368,6 +368,29 @@ async function test(name, fn) {
   await test('Чужой ID с username админа — отказ (авторизация только по ID)', () => assert.strictEqual(u1[0].json.isAuthorized, false));
   const h1 = await rB.run('Auth & Command Router', [tg('/help')]);
   await test('/help: критерии в тексте совпадают с конфигом', () => assert.ok(h1[0].json.directReplyMessage.includes('прибыль ≥ 30') && h1[0].json.directReplyMessage.includes('/unlock')));
+
+  // ---------- Сценарий 6: свежий alstyle_catalog_cache + ASBIS из мультикаталога ----------
+  resetDisk();
+  const multiRows = CATALOG.map(r => Object.assign({}, r)).concat([{ 'Код': 'AS-NB', 'Наименование': 'Ноутбук ASUS ExpertBook B1', 'Полное наименование': 'Ноутбук ASUS ExpertBook B1, Intel Core i5, Windows 11', 'Цена дилерская': '240000', distributor: 'ASBIS', 'Остаток': '2' }]);
+  fs.writeFileSync(path.join(N8N_DIR, 'multi_catalog_cache.json'), JSON.stringify(multiRows));
+  const old = new Date(Date.now() - 9 * 86400000);
+  fs.utimesSync(path.join(N8N_DIR, 'multi_catalog_cache.json'), old, old);
+  const freshAlstyle = CATALOG.filter(r => r.distributor !== 'ASBIS').map(r => r['Код'] === 'NB-001' ? Object.assign({}, r, { 'Цена дилерская': '255000' }) : r);
+  fs.writeFileSync(path.join(N8N_DIR, 'alstyle_catalog_cache.json'), JSON.stringify(freshAlstyle));
+  const r6 = new Runner({ env: ENV, router: makeRouter({}).router, execId: 'exec-6' });
+  const p6 = await runPipeline(r6, CRON);
+  await test('Каталог: Al-Style из свежего alstyle_catalog_cache, ASBIS из мультикаталога, возраст в дайджесте', () => {
+    const src = r6.outputs['Fetch Al-Style Catalog'][0].json.catalogSources;
+    assert.deepStrictEqual(src.map(x => x.filter), ['all', 'asbis']);
+    const nbPre = p6.pre.find(x => x.json.lotId === 'L-NB').json;
+    const codes = nbPre.candidates.map(c => c.code + ':' + c.price);
+    assert.ok(codes.includes('NB-001:255000'), 'свежая цена Al-Style не применена: ' + codes);
+    assert.ok(codes.includes('AS-NB:240000'), 'ASBIS не подмешан: ' + codes);
+    assert.strictEqual(codes.filter(c => c.startsWith('NB-001:')).length, 1, 'Al-Style-строки мультикаталога не должны дублироваться: ' + codes);
+    const t = p6.digest.map(x => x.json.summaryMessage).join('\n');
+    assert.ok(/Каталог устарел: Al-Style — \d+ ч, ASBIS — 9 дн\./.test(t), t.slice(-500));
+  });
+  try { fs.unlinkSync(path.join(N8N_DIR, 'alstyle_catalog_cache.json')); } catch (e) {}
 
   // ---------- Сравнение с исходной версией (как было) ----------
   resetDisk();

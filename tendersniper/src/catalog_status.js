@@ -7,19 +7,26 @@ const alstyleCachePath = '/home/node/.n8n/alstyle_catalog_cache.json';
 
 let targetPath = null;
 let mtime = null;
-
-if (fs.existsSync(multiCachePath) && fs.statSync(multiCachePath).size > 100000) {
-  targetPath = multiCachePath;
-  mtime = fs.statSync(multiCachePath).mtimeMs;
-} else if (fs.existsSync(multiBackupPath) && fs.statSync(multiBackupPath).size > 100000) {
-  console.warn('[CACHE FALLBACK] Мультикаталог взят из резервной копии: ' + multiBackupPath);
-  targetPath = multiBackupPath;
-  mtime = fs.statSync(multiBackupPath).mtimeMs;
-} else if (fs.existsSync(alstyleCachePath) && fs.statSync(alstyleCachePath).size > 100000) {
-  console.warn('[CACHE FALLBACK] Используется каталог Al-Style: ' + alstyleCachePath);
-  targetPath = alstyleCachePath;
-  mtime = fs.statSync(alstyleCachePath).mtimeMs;
+const fileInfo = (p) => { try { const st = fs.statSync(p); return st.size > 100000 ? { path: p, mtime: st.mtimeMs } : null; } catch (e) { return null; } };
+const multi = fileInfo(multiCachePath) || fileInfo(multiBackupPath);
+const alstyle = fileInfo(alstyleCachePath);
+// Источники: Al-Style — из более свежего файла (ночная синхронизация обновляет только alstyle_catalog_cache.json),
+// ASBIS — из мультикаталога
+let catalogSources = [];
+let alstyleMtime = null, asbisMtime = null;
+if (multi && alstyle && alstyle.mtime > multi.mtime) {
+  catalogSources = [{ path: alstyle.path, filter: 'all', distributor: 'Al-Style' }, { path: multi.path, filter: 'asbis' }];
+  alstyleMtime = alstyle.mtime; asbisMtime = multi.mtime;
+  console.log('[CATALOG] Al-Style — из alstyle_catalog_cache.json (свежее мультикаталога), ASBIS — из мультикаталога');
+} else if (multi) {
+  catalogSources = [{ path: multi.path, filter: 'all' }];
+  alstyleMtime = asbisMtime = multi.mtime;
+} else if (alstyle) {
+  console.warn('[CACHE FALLBACK] Используется только каталог Al-Style: ' + alstyle.path);
+  catalogSources = [{ path: alstyle.path, filter: 'all', distributor: 'Al-Style' }];
+  alstyleMtime = alstyle.mtime;
 }
+if (catalogSources.length) { targetPath = catalogSources[0].path; mtime = alstyleMtime; }
 
 if (!targetPath) {
   console.error('[CATALOG ERROR] Файл мультикаталога не найден ни по одному из путей!');
@@ -52,6 +59,9 @@ return [{
     catalogLoadError: false,
     staleCatalog,
     catalogAgeHours: +ageHours.toFixed(1),
+    catalogSources,
+    alstyleAgeHours: alstyleMtime ? +((Date.now() - alstyleMtime) / 3600000).toFixed(1) : null,
+    asbisAgeHours: asbisMtime ? +((Date.now() - asbisMtime) / 3600000).toFixed(1) : null,
     catalogMtime: mtime,
     catalogPath: targetPath
   }

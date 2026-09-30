@@ -198,8 +198,20 @@ if (fn && fn.almaty !== undefined) {
   statLines.push('   <i>отсеяно: уже проверены ' + fn.known + ', не-ИТ ' + fn.nonIt + ', нет в каталоге ' + fn.noCatalogMatch +
     ', не та категория ' + fn.noCategoryMatch + ', убыточно при −' + Math.round(TS_CONFIG.BID_DISCOUNT * 100) + '% ' + fn.notProfitable +
     (fn.locked ? ', вендор-лок ' + fn.locked : '') + (fn.budget ? ', бюджет ' + fn.budget : '') + '</i>');
+  // Почему убыточно: бюджет на штуку против нашей лучшей закупки (дорогой каталог или низкий бюджет?)
+  if (Array.isArray(fn.unprofitable) && fn.unprofitable.length) {
+    statLines.push('💸 <b>Убыточные при −' + Math.round(TS_CONFIG.BID_DISCOUNT * 100) + '% (бюджет/шт → наша закупка/шт):</b>');
+    for (const u of fn.unprofitable.slice(0, 5)) {
+      statLines.push('   • ' + escapeHtml(u.lot) + ' ×' + u.qty + ': ' + formatKZT(u.unitBudget) + ' → ' + formatKZT(u.unitCost) +
+        ' <i>(' + escapeHtml(u.product) + (u.distributor === 'ASBIS' ? ', ASBIS' : '') + ', маржа ' + u.margin + '%)</i>');
+    }
+  }
 }
+const cat = fn && fn.catalog;
+const ageText = (h) => h === null || h === undefined ? '?' : (h < 48 ? Math.round(h) + ' ч' : Math.round(h / 24) + ' дн.');
+const catalogStale = cat && ((cat.alstyleAgeHours ?? 0) > 48 || (cat.asbisAgeHours ?? 0) > 72);
 if (mergeMeta.errorCount && !mergeMeta.apiFailure) statLines.push('⚠️ Ошибки ЦЭФ API: ' + mergeMeta.errorCount + ' из ' + (mergeMeta.keywordCount || '?') + ' запросов');
+if (catalogStale) statLines.push('⚠️ Каталог устарел: Al-Style — ' + ageText(cat.alstyleAgeHours) + ', ASBIS — ' + ageText(cat.asbisAgeHours) + '. Цены закупки могут не совпадать с реальными.');
 const statsBlock = statLines.length ? '\n\n' + statLines.join('\n') : '';
 
 // 4. Формирование сообщений для Telegram с защитой от лимита 4096 символов
@@ -235,7 +247,7 @@ if (verifiedBullets.length > 0) {
     const hasStaleCatalog = eligibleLots.some(l => l.staleCatalog);
     if (c === 0) {
       if (hasStaleCatalog) {
-        chunkBody += '⚠️ <i>Внимание: кэш каталога старше 48 часов — цены могли измениться.</i>\n\n';
+        chunkBody += '⚠️ <i>Внимание: кэш каталога устарел — цены могли измениться.</i>\n\n';
       }
       chunkBody += 
         '📍 <b>Регион:</b> г. Алматы (КАТО 75*) | Способы: ЗЦП, ОИ, ОК\n' +

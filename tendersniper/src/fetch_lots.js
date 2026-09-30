@@ -19,16 +19,8 @@ const NODE_DEADLINE_MS = 170000;
 const HARD_DEADLINE_MS = 250000;
 const startedAt = Date.now();
 
-// Варианты написания: фильтр nameRu может быть чувствителен к регистру, а названия лотов
-// обычно начинаются с заглавной («Ноутбук», «Принтер») или пишутся капсом («МФУ», «ИБП»).
-function keywordVariants(kw) {
-  const v = [kw, kw.charAt(0).toUpperCase() + kw.slice(1)];
-  if (kw.length <= 4 || /[a-z]/i.test(kw)) v.push(kw.toUpperCase());
-  if (/^[a-z]/i.test(kw) && kw.includes('-')) v.push(kw.split('-').map(x => x.charAt(0).toUpperCase() + x.slice(1)).join('-'));
-  return [...new Set(v)];
-}
-const baseKeywords = $input.all().map(i => i.json?.keyword).filter(Boolean);
-const keywords = [...new Set(baseKeywords.flatMap(keywordVariants))];
+// API ЦЭФ ищет по nameRu без учёта регистра (проверено на живом API 30.09: 0 лотов «только с заглавной»)
+const keywords = $input.all().map(i => i.json?.keyword).filter(Boolean);
 
 const BASE_FIELDS = 'id lotNumber nameRu descriptionRu amount count customerBin customerNameRu trdBuyNumberAnno indexDate refTradeMethodsId plnPointKatoList Files { id filePath originalName nameRu }';
 const QUERY_LEVELS = [
@@ -147,12 +139,6 @@ const out = results.map(r => {
   return { json: Object.assign(r, { queryLevel: level.name }) };
 });
 const truncatedCount = results.filter(r => r.truncated).length;
-// Диагностика регистра: сколько лотов нашлось ТОЛЬКО по вариантам с заглавной/капсом
-const idsOf = (pred) => new Set(results.filter((r, j) => pred(keywords[j])).flatMap(r => (r.data?.Lots || r.partialLots || []).map(l => l.id)));
-const lowerIds = idsOf(kw => kw === kw.toLowerCase());
-const onlyVariantIds = [...idsOf(kw => kw !== kw.toLowerCase())].filter(id => !lowerIds.has(id));
-console.log(`[FETCH CASE] Лотов по словам в нижнем регистре: ${lowerIds.size} | найдено ТОЛЬКО с заглавной/капсом: ${onlyVariantIds.length}` +
-  (onlyVariantIds.length ? ' — фильтр nameRu чувствителен к регистру, варианты нужны' : ''));
-console.log('[FETCH] Ключевых слов: ' + baseKeywords.length + ' (запросов с вариантами: ' + keywords.length + ')' + ' | Лотов (сырых): ' + results.reduce((s, r) => s + (r.data?.Lots?.length || r.partialLots?.length || 0), 0) +
+console.log('[FETCH] Ключевых слов: ' + keywords.length + ' | Лотов (сырых): ' + results.reduce((s, r) => s + (r.data?.Lots?.length || r.partialLots?.length || 0), 0) +
   ' | Усечено пагинацией: ' + truncatedCount + ' | Время: ' + Math.round((Date.now() - startedAt) / 1000) + ' c');
 return out;

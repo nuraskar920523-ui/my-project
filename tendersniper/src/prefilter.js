@@ -21,17 +21,23 @@ const fs = require('fs');
 const catalogStatus = $input.first()?.json || {};
 
 let catalogRows = [];
-const targetPath = catalogStatus.catalogPath || '/home/node/.n8n/multi_catalog_cache.json';
-const fallbackPath = '/home/node/.n8n/alstyle_catalog_cache.json';
-
-try {
-  if (fs.existsSync(targetPath)) {
-    catalogRows = JSON.parse(fs.readFileSync(targetPath, 'utf8'));
-  } else if (fs.existsSync(fallbackPath)) {
-    catalogRows = JSON.parse(fs.readFileSync(fallbackPath, 'utf8'));
+const sources = Array.isArray(catalogStatus.catalogSources) && catalogStatus.catalogSources.length
+  ? catalogStatus.catalogSources
+  : [{ path: catalogStatus.catalogPath || '/home/node/.n8n/multi_catalog_cache.json', filter: 'all' }];
+for (const src of sources) {
+  try {
+    const rows = JSON.parse(fs.readFileSync(src.path, 'utf8'));
+    if (!Array.isArray(rows)) continue;
+    for (const r of rows) {
+      if (src.filter === 'asbis' && !/asbis/i.test(String(r.distributor || ''))) continue;
+      catalogRows.push(src.distributor && !r.distributor ? Object.assign({ distributor: src.distributor }, r) : r);
+    }
+  } catch (e) {
+    console.error('[PRE-FILTER ERROR] Ошибка чтения каталога ' + src.path + ':', e.message);
   }
-} catch (e) {
-  console.error('[PRE-FILTER ERROR] Ошибка чтения каталога:', e.message);
+}
+if (!catalogRows.length) {
+  try { catalogRows = JSON.parse(fs.readFileSync('/home/node/.n8n/alstyle_catalog_cache.json', 'utf8')); } catch (e) {}
 }
 
 if (!Array.isArray(catalogRows) || catalogRows.length === 0) {
@@ -403,6 +409,7 @@ const SAFETY_RULES =
 const output = [];
 
 // Воронка: где и сколько лотов отсеяно (выводится в лог и в дайджест)
+const unprofitable = [];
 const funnel = { almaty: recentLots.length, known: 0, docPending: 0, budget: 0, nonIt: 0, locked: 0, noCatalogMatch: 0, noCategoryMatch: 0, notProfitable: 0, toAi: 0 };
 
 for (const lot of recentLots) {
@@ -671,7 +678,11 @@ for (const lot of recentLots) {
     const primaryCost = topPrimary[0].price;
     const accessoryCost = topAccessory.length > 0 ? topAccessory[0].price : 0;
     const baseFin = evaluateFinancials(lotBudget, primaryCost + accessoryCost, lotQty, topPrimary[0].name);
-    if (!baseFin.isViable) { funnel.notProfitable++; continue; }
+    if (!baseFin.isViable) {
+      funnel.notProfitable++;
+      unprofitable.push({ lot: lotNameOnly.substring(0, 50), qty: lotQty, unitBudget: Math.round(lotBudget / lotQty), unitCost: Math.round(primaryCost + accessoryCost), product: String(topPrimary[0].name).substring(0, 40), margin: baseFin.marginPercent });
+      continue;
+    }
 
     const geminiPrompt =
       "Ты — старший юрист по госзакупкам РК и главный технический эксперт ТОО «Os.corp Energy». Проверь применимость КОМПЛЕКТА со склада к лоту и заполни МАТРИЦУ СООТВЕТСТВИЯ.\n\n" +
@@ -717,6 +728,7 @@ for (const lot of recentLots) {
   } else {
     const scored = [];
     let categoryMatched = 0;
+    let cheapest = null;
 
     for (const [pIdx, hits] of candidateHits.entries()) {
       const idfScore = candidateScores.get(pIdx) || 0;
@@ -808,6 +820,7 @@ for (const lot of recentLots) {
 
       categoryMatched++;
       const fin = evaluateFinancials(lotBudget, prod.price, lotQty, prod.name);
+      if (!cheapest || fin.netProfit > cheapest.fin.netProfit) cheapest = { prod, fin };
       if (!fin.isViable) continue;
 
       let score = (idfScore * 20) + (hits * 50) + (titleHits * 100);
@@ -846,7 +859,14 @@ for (const lot of recentLots) {
       });
     }
 
-    if (scored.length === 0) { if (categoryMatched) funnel.notProfitable++; else funnel.noCategoryMatch++; continue; }
+    if (scored.length === 0) {
+      if (categoryMatched) {
+        funnel.notProfitable++;
+        unprofitable.push({ lot: lotNameOnly.substring(0, 50), qty: lotQty, unitBudget: Math.round(lotBudget / lotQty), unitCost: Math.round(cheapest.prod.price),
+          product: String(cheapest.prod.name).substring(0, 40), distributor: cheapest.prod.distributor, margin: cheapest.fin.marginPercent });
+      } else funnel.noCategoryMatch++;
+      continue;
+    }
     scored.sort((a, b) => b.score !== a.score ? (b.score - a.score) : (b.price - a.price));
 
     const topCandidates = scored.slice(0, 5);
@@ -929,6 +949,8 @@ while (selectedLots.length < TOTAL_LOTS_LIMIT && overflowLots.length > 0) {
 const deferredLots = overflowLots.length;
 funnel.toAi = selectedLots.filter(l => !l.json.isVendorLocked).length;
 funnel.deferred = deferredLots;
+funnel.unprofitable = unprofitable.sort((a, b) => b.margin - a.margin).slice(0, 8);
+funnel.catalog = { alstyleAgeHours: catalogStatus.alstyleAgeHours ?? catalogStatus.catalogAgeHours ?? null, asbisAgeHours: catalogStatus.asbisAgeHours ?? null, products: products.length };
 console.log('[PRE-FILTER FUNNEL] ' + JSON.stringify(funnel));
 console.log(`[PRE-FILTER] Кандидатов для ИИ: ${selectedLots.filter(l => !l.json.isVendorLocked).length} | Вендор-локов: ${selectedLots.filter(l => l.json.isVendorLocked).length} | ` +
   `Отложено до след. цикла: ${deferredLots} | Ждут чтения ТЗ: ${skippedDocPending}`);
